@@ -1,6 +1,7 @@
-# camera_create
+# camera-create
 
-End-to-end metric camera estimation from a monocular video:
+Camera annotation pipeline using the SANA-WM Stage 2 method for end-to-end
+metric camera estimation from a monocular video:
 
 ```text
 video -> Pi3X temporal depth -> MoGe-2 metric anchor -> EMA fusion
@@ -21,4 +22,3 @@ ckpt/
 
 VIPE is source code plus its own downloaded model cache rather than one single
 checkpoint. `ckpt/vipe/` is reserved for an optional explicit VIPE cache.
-
