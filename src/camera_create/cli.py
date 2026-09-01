@@ -1,0 +1,74 @@
+"""Define the single end-to-end command-line interface for camera_create."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from pathlib import Path
+
+from .config import ModelPaths
+from .pipeline import CameraCreatePipeline, PipelineOptions
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build CLI arguments without importing heavyweight model dependencies."""
+    parser = argparse.ArgumentParser(
+        description="Estimate metric camera intrinsics/extrinsics from a video"
+    )
+    parser.add_argument("--input", required=True, type=Path, help="Input video path")
+    parser.add_argument("--output", required=True, type=Path, help="Output directory")
+    parser.add_argument("--ckpt-root", type=Path, help="Default: camera_create/ckpt")
+    parser.add_argument("--pi3x-ckpt", type=Path, help="Override Pi3X checkpoint path")
+    parser.add_argument(
+        "--moge2-ckpt", type=Path, help="Override MoGe-2 checkpoint path"
+    )
+    parser.add_argument(
+        "--device", default="cuda", help="Torch device, normally cuda or cuda:0"
+    )
+    parser.add_argument("--pi3x-chunk", type=int, default=16)
+    parser.add_argument("--pi3x-stride", type=int, default=8)
+    parser.add_argument("--ema-momentum", type=float, default=0.99)
+    parser.add_argument("--max-inference-side", type=int, default=560)
+    parser.add_argument(
+        "--fov-x-deg", type=float, help="Optional known horizontal field of view"
+    )
+    parser.add_argument("--work-dir", type=Path, help="Explicit scratch directory")
+    parser.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="Copy intermediate cache/VIPE data into output/work",
+    )
+    parser.add_argument("--vipe-command", default="vipe")
+    parser.add_argument("--verbose", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the end-to-end pipeline and print its machine-readable report."""
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+    defaults = ModelPaths.defaults(args.ckpt_root)
+    models = ModelPaths(
+        pi3x=(args.pi3x_ckpt or defaults.pi3x).resolve(),
+        moge2=(args.moge2_ckpt or defaults.moge2).resolve(),
+        vipe=defaults.vipe,
+    )
+    options = PipelineOptions(
+        device=args.device,
+        pi3x_chunk=args.pi3x_chunk,
+        pi3x_stride=args.pi3x_stride,
+        ema_momentum=args.ema_momentum,
+        max_inference_side=args.max_inference_side,
+        fov_x_deg=args.fov_x_deg,
+        keep_work=args.keep_work,
+        vipe_command=args.vipe_command,
+    )
+    report = CameraCreatePipeline(models, options).run(
+        args.input, args.output, args.work_dir
+    )
+    print(json.dumps(report, indent=2))
+    return 0

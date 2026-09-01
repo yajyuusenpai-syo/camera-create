@@ -1,0 +1,27 @@
+# Configure VIPE to consume precomputed metric depths during bundle adjustment.
+defaults:
+  - /slam: default
+  - _self_
+
+instance: vipe.pipeline.default.DefaultAnnotationPipeline
+
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance: null
+
+slam:
+  keyframe_depth: cached
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+
+post:
+  depth_align_model: null
+
+output:
+  path: vipe_results/
+  skip_exists: false
+  save_artifacts: true
+  save_slam_map: false
+  save_viz: false
+  viz_downsample: 2
+  viz_attributes: [['rgb']]
