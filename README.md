@@ -10,6 +10,8 @@ video -> Pi3X temporal depth -> MoGe-3 metric anchor -> EMA fusion
 
 The primary entry point is `cli.py`; the package also installs the
 `camera-create` command. See `docs/DEPLOYMENT.md` for installation and usage.
+For exact source cloning and isolated environment commands, see
+`docs/THREE_ENV_SETUP.md`.
 
 Checkpoint layout:
 

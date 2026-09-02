@@ -1,5 +1,6 @@
 # Ignore local Python environments, generated camera data, and model payloads.
 .venv/
+.envs/
 .conda-env/
 .conda-pkgs/
 __pycache__/
@@ -14,5 +15,8 @@ ckpt/pi3x/*
 !ckpt/pi3x/.gitkeep
 ckpt/moge2/*
 !ckpt/moge2/.gitkeep
+ckpt/moge3/*
+!ckpt/moge3/.gitkeep
 ckpt/vipe/*
 !ckpt/vipe/.gitkeep
+third_party/

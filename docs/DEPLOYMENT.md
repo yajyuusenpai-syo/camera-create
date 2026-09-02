@@ -1,5 +1,8 @@
 # 部署与调用
 
+完整的源码克隆、三套 `venv` 创建、CUDA wheel 选择、checkpoint 放置和环境排错见
+[`THREE_ENV_SETUP.md`](THREE_ENV_SETUP.md)。本页说明架构选择和调用约定。
+
 ## 1. 部署结论
 
 - Linux 推荐；VIPE 含 CUDA 扩展，Windows 原生环境通常不适合作为生产环境。
@@ -23,6 +26,13 @@ VIPE 还需要独立编译 CUDA 扩展。三个阶段通过 NPZ/JSON 文件衔�
 三个模型分别创建 Python 3.10 Conda 环境；Conda 并不是代码本身的强制要求。
 
 ## 2. 安装三个模型
+
+自动安装入口：
+
+```bash
+bash scripts/clone_models.sh
+bash scripts/setup_three_envs.sh
+```
 
 将模型放在以下固定目录：
 
@@ -51,17 +61,17 @@ MoGe-3 推荐 `Ruicheng/moge-3-vitl`，不默认采用 1.25B 的 ViT-G。ViT-L �
 
 ## 3. 安装 patched VIPE
 
-仓库已包含 `third_party/vipe`，执行：
+克隆脚本会生成 `third_party/vipe`，执行：
 
 ```bash
-/opt/camera-create/envs/vipe/bin/python scripts/setup_vipe.py
+.envs/vipe/bin/python scripts/setup_vipe.py --vipe-source third_party/vipe
 ```
 
 该脚本会把 cached metric-depth backend 与 `vipe_cached_depth` 配置复制到
 VIPE checkout，然后使用当前 Python 环境进行 editable install。运行前检查：
 
 ```bash
-/opt/camera-create/envs/vipe/bin/python scripts/check_environment.py
+.envs/pi3x/bin/python scripts/check_three_envs.py --env-root .envs --project-root .
 ```
 
 ## 4. 端到端调用
