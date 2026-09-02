@@ -30,9 +30,9 @@ pip check: No broken requirements found
 - 可导入的 `pi3`；
 - 可导入的 `moge`；
 - 安装后的 `vipe` CLI；
-- `ckpt/pi3x` 与 `ckpt/moge2` 模型文件。
+- `ckpt/pi3x` 与 `ckpt/moge3` 模型文件。
 
 因此本次结论是 Python 项目、CLI、数学处理和输出插值的标准验证通过，不能将其
-表述为 Pi3X + MoGe-2 + VIPE 真实模型端到端验证通过。部署 GPU 环境后，应先运行
-`python scripts/check_environment.py`，所有条目为 `OK` 后再执行真实视频 smoke test。
-
+表述为 Pi3X + MoGe-3 + VIPE 真实模型端到端验证通过。当前代码仍为 MoGe-2
+同进程实现，三环境 worker 改造也尚未完成。完成改造后，应分别检查三个环境，
+再执行真实视频 smoke test。
