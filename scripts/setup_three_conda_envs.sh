@@ -34,14 +34,15 @@ create_env() {
     exit 2
   fi
   "${CONDA_COMMAND}" create --prefix "${path}" python=3.10 pip -y
-  "${CONDA_COMMAND}" run --prefix "${path}" python -m pip install --upgrade pip setuptools wheel
+  "${CONDA_COMMAND}" run --no-capture-output --prefix "${path}" \
+    python -m pip install --upgrade pip setuptools wheel
 }
 
 run_python() {
   local path="$1"
   shift
   env -u PYTHONPATH -u PYTHONHOME -u PIP_USER PYTHONNOUSERSITE=1 \
-    "${CONDA_COMMAND}" run --prefix "${path}" python "$@"
+    "${CONDA_COMMAND}" run --no-capture-output --prefix "${path}" python "$@"
 }
 
 mkdir -p "${ENV_ROOT}"
@@ -49,6 +50,7 @@ create_env "${ENV_ROOT}/pi3x"
 create_env "${ENV_ROOT}/moge3"
 create_env "${ENV_ROOT}/vipe"
 
+echo "[1/4] Installing Pi3X Torch, dependencies, source, and camera-create"
 # Pi3X keeps its official Torch/NumPy pins inside a dedicated Conda prefix.
 run_python "${ENV_ROOT}/pi3x" -m pip install \
   torch==2.5.1 torchvision==0.20.1 --index-url "${PI3_TORCH_INDEX_URL}"
@@ -57,11 +59,13 @@ run_python "${ENV_ROOT}/pi3x" -m pip install -e "${SOURCE_ROOT}/Pi3"
 run_python "${ENV_ROOT}/pi3x" -m pip install --no-deps -e "${PROJECT_ROOT}"
 run_python "${ENV_ROOT}/pi3x" -m pip install scipy tqdm
 
+echo "[2/4] Installing MoGe-3 Torch, dependencies, and source"
 # MoGe-3 is kept separate because it requires NumPy 2.x and Triton/FlexGEMM.
 run_python "${ENV_ROOT}/moge3" -m pip install \
   torch torchvision --index-url "${MOGE_TORCH_INDEX_URL}"
 run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/MoGe"
 
+echo "[3/4] Installing VIPE Torch and compiling VIPE CUDA extensions"
 # VIPE compiles CUDA extensions against the Torch installed in this prefix.
 run_python "${ENV_ROOT}/vipe" -m pip install \
   torch torchvision --index-url "${VIPE_TORCH_INDEX_URL}"
@@ -69,6 +73,7 @@ run_python "${ENV_ROOT}/vipe" "${PROJECT_ROOT}/scripts/setup_vipe.py" \
   --vipe-source "${SOURCE_ROOT}/vipe"
 
 mkdir -p "${PROJECT_ROOT}/ckpt/pi3x" "${PROJECT_ROOT}/ckpt/moge3" "${PROJECT_ROOT}/ckpt/vipe"
+echo "[4/4] Checking isolated imports and CUDA visibility"
 run_python "${ENV_ROOT}/pi3x" "${PROJECT_ROOT}/scripts/check_three_envs.py" \
   --env-root "${ENV_ROOT}" --project-root "${PROJECT_ROOT}" --skip-checkpoints
 

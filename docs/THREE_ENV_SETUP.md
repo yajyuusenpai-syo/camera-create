@@ -214,6 +214,10 @@ source .envs/vipe/bin/activate
 - `numpy` 冲突：确认命令使用的是 `.envs/<model>/bin/python`，不要使用裸 `pip`。
 - Conda 求解很慢：脚本只用 Conda 创建 Python 3.10 prefix，模型依赖仍由各 prefix
   的 `python -m pip` 安装；可安装 `mamba`，但不是必需。
+- 安装停在 `Requirement already satisfied: packaging...` 后长时间没有输出：旧版
+  `conda run` 正在捕获后续 PyTorch 下载输出，看起来像卡住。新版脚本使用
+  `--no-capture-output` 实时显示进度。可在另一个终端用
+  `pgrep -af 'conda|pip|python'` 确认进程；若确实无进程，再重新运行脚本。
 - `CondaError: Run 'conda init'`：脚本使用 `conda run --prefix`，正常情况下无需
   `conda init`；检查 `CONDA_COMMAND` 是否指向真实的 Conda 可执行文件。
 - 安装日志出现与本项目无关的 `deepfilternet`、`evo` 或系统 `matplotlib` 冲突：
