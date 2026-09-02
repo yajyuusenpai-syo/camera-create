@@ -35,7 +35,8 @@ create_env "${ENV_ROOT}/vipe"
 
 # Pi3's official requirements pin torch 2.5.1, torchvision 0.20.1, NumPy 1.26.4.
 "${ENV_ROOT}/pi3x/bin/python" -m pip install \
-  torch==2.5.1 torchvision==0.20.1 --index-url "${PI3_TORCH_INDEX_URL}"
+  torch==2.5.1 torchvision==0.20.1 \
+  --index-url "${PI3_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
 "${ENV_ROOT}/pi3x/bin/python" -m pip install -r "${SOURCE_ROOT}/Pi3/requirements.txt"
 "${ENV_ROOT}/pi3x/bin/python" -m pip install -e "${SOURCE_ROOT}/Pi3"
 "${ENV_ROOT}/pi3x/bin/python" -m pip install --no-deps -e "${PROJECT_ROOT}"
@@ -43,12 +44,14 @@ create_env "${ENV_ROOT}/vipe"
 
 # MoGe-3 requires NumPy 2.x and adds Triton/FlexGEMM-based sparse refinement.
 "${ENV_ROOT}/moge3/bin/python" -m pip install \
-  torch torchvision --index-url "${MOGE_TORCH_INDEX_URL}"
+  torch torchvision \
+  --index-url "${MOGE_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
 "${ENV_ROOT}/moge3/bin/python" -m pip install -e "${SOURCE_ROOT}/MoGe"
 
 # VIPE builds a CUDA extension during installation; nvcc and CUDA-enabled Torch are required.
 "${ENV_ROOT}/vipe/bin/python" -m pip install \
-  torch torchvision --index-url "${VIPE_TORCH_INDEX_URL}"
+  torch torchvision \
+  --index-url "${VIPE_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
 "${ENV_ROOT}/vipe/bin/python" "${PROJECT_ROOT}/scripts/setup_vipe.py" \
   --vipe-source "${SOURCE_ROOT}/vipe"
 

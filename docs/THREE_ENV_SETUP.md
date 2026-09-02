@@ -218,6 +218,9 @@ source .envs/vipe/bin/activate
   `conda run` 正在捕获后续 PyTorch 下载输出，看起来像卡住。新版脚本使用
   `--no-capture-output` 实时显示进度。可在另一个终端用
   `pgrep -af 'conda|pip|python'` 确认进程；若确实无进程，再重新运行脚本。
+- PyTorch 安装报 `No matching distribution found for numpy`：旧脚本只配置了
+  PyTorch CUDA index，而该索引不托管 NumPy。新版同时增加官方 PyPI 作为依赖
+  回退源。无需删除环境；更新代码后重新运行同一个安装脚本，pip 会复用缓存。
 - `CondaError: Run 'conda init'`：脚本使用 `conda run --prefix`，正常情况下无需
   `conda init`；检查 `CONDA_COMMAND` 是否指向真实的 Conda 可执行文件。
 - 安装日志出现与本项目无关的 `deepfilternet`、`evo` 或系统 `matplotlib` 冲突：
