@@ -32,7 +32,7 @@ create_env "${ENV_ROOT}/vipe"
 "${ENV_ROOT}/pi3x/bin/python" -m pip install -r "${SOURCE_ROOT}/Pi3/requirements.txt"
 "${ENV_ROOT}/pi3x/bin/python" -m pip install -e "${SOURCE_ROOT}/Pi3"
 "${ENV_ROOT}/pi3x/bin/python" -m pip install --no-deps -e "${PROJECT_ROOT}"
-"${ENV_ROOT}/pi3x/bin/python" -m pip install scipy opencv-python-headless tqdm
+"${ENV_ROOT}/pi3x/bin/python" -m pip install scipy tqdm
 
 # MoGe-3 requires NumPy 2.x and adds Triton/FlexGEMM-based sparse refinement.
 "${ENV_ROOT}/moge3/bin/python" -m pip install \

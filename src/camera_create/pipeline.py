@@ -1,26 +1,23 @@
-"""Orchestrate the complete Pi3X + MoGe-2 + VIPE metric camera pipeline."""
+"""Orchestrate isolated Pi3X + MoGe-3 + VIPE metric camera inference."""
 
 from __future__ import annotations
 
 import logging
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .artifacts import export_camera_artifacts
 from .config import ModelPaths
-from .depth import (
-    default_fov_x,
-    fuse_metric_depths,
-    infer_moge2,
-    infer_pi3x,
-    load_moge2,
-    load_pi3x,
-    save_depth_cache,
-)
-from .video import read_video
+from .depth import default_fov_x, fuse_metric_depths, save_depth_cache
 from .vipe_runner import run_vipe
+from .worker_runner import (
+    default_environment_executable,
+    ensure_matching_workers,
+    run_moge3_worker,
+    run_pi3x_worker,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -36,7 +33,17 @@ class PipelineOptions:
     max_inference_side: int = 560
     fov_x_deg: float | None = None
     keep_work: bool = False
-    vipe_command: str = "vipe"
+    pi3x_python: Path = field(
+        default_factory=lambda: default_environment_executable("pi3x")
+    )
+    moge3_python: Path = field(
+        default_factory=lambda: default_environment_executable("moge3")
+    )
+    vipe_command: str = field(
+        default_factory=lambda: str(default_environment_executable("vipe", "vipe"))
+    )
+    moge3_refine_steps: int = 3
+    moge3_fp16: bool = True
 
 
 class CameraCreatePipeline:
@@ -61,27 +68,37 @@ class CameraCreatePipeline:
         )
         actual_work.mkdir(parents=True, exist_ok=True)
         try:
-            LOG.info("Decoding inference frames from %s", video)
-            video_data = read_video(video, self.options.max_inference_side)
-            fov_x = self.options.fov_x_deg or default_fov_x(video_data.original_width)
-            LOG.info("Loading Pi3X from %s", self.models.pi3x)
-            pi3x = load_pi3x(self.models.pi3x, self.options.device)
-            pi3x_depth = infer_pi3x(
-                pi3x,
-                video_data.frames_rgb,
+            pi3x_cache = actual_work / "pi3x_depth.npz"
+            moge3_cache = actual_work / "moge3_depth.npz"
+            LOG.info("Running isolated Pi3X worker: %s", self.options.pi3x_python)
+            pi3x_result = run_pi3x_worker(
+                self.options.pi3x_python,
+                video,
+                self.models.pi3x,
+                pi3x_cache,
                 self.options.device,
                 self.options.pi3x_chunk,
                 self.options.pi3x_stride,
+                self.options.max_inference_side,
             )
-            del pi3x
-            LOG.info("Loading MoGe-2 from %s", self.models.moge2)
-            moge2 = load_moge2(self.models.moge2, self.options.device)
-            moge2_depth = infer_moge2(
-                moge2, video_data.frames_rgb, self.options.device, fov_x
+            fov_x = self.options.fov_x_deg or default_fov_x(
+                pi3x_result.original_width
             )
-            del moge2
+            LOG.info("Running isolated MoGe-3 worker: %s", self.options.moge3_python)
+            moge3_result = run_moge3_worker(
+                self.options.moge3_python,
+                video,
+                self.models.moge3,
+                moge3_cache,
+                self.options.device,
+                self.options.max_inference_side,
+                fov_x,
+                self.options.moge3_refine_steps,
+                self.options.moge3_fp16,
+            )
+            ensure_matching_workers(pi3x_result, moge3_result)
             fused, scale, raw_scale = fuse_metric_depths(
-                pi3x_depth, moge2_depth, self.options.ema_momentum
+                pi3x_result.depth, moge3_result.depth, self.options.ema_momentum
             )
             cache_path = actual_work / "metric_depth_cache.npz"
             save_depth_cache(cache_path, fused, scale, raw_scale)
@@ -92,19 +109,20 @@ class CameraCreatePipeline:
             )
             metadata = {
                 "input_video": str(video),
-                "frame_count": video_data.frame_count,
-                "original_width": video_data.original_width,
-                "original_height": video_data.original_height,
-                "fps": video_data.fps,
-                "depth_inference_width": int(video_data.frames_rgb.shape[2]),
-                "depth_inference_height": int(video_data.frames_rgb.shape[1]),
-                "fov_x_deg_for_moge2": fov_x,
+                "frame_count": pi3x_result.frame_count,
+                "original_width": pi3x_result.original_width,
+                "original_height": pi3x_result.original_height,
+                "fps": pi3x_result.fps,
+                "depth_inference_width": pi3x_result.inference_width,
+                "depth_inference_height": pi3x_result.inference_height,
+                "fov_x_deg_for_moge3": fov_x,
+                "moge3_refine_steps": self.options.moge3_refine_steps,
                 "translation_unit": "metre",
                 "pose_convention": "OpenCV c2w and w2c; +x right, +y down, +z forward",
-                "metric_basis": "MoGe-2 metric depth fused into Pi3X temporal depth and injected into VIPE BA",
+                "metric_basis": "MoGe-3 metric depth fused into Pi3X temporal depth and injected into VIPE BA",
             }
             report = export_camera_artifacts(
-                video, vipe_dir, output_dir, video_data.frame_count, scale, metadata
+                video, vipe_dir, output_dir, pi3x_result.frame_count, scale, metadata
             )
             if self.options.keep_work:
                 retained = output_dir / "work"

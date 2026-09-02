@@ -153,7 +153,25 @@ source .envs/vipe/bin/activate
 
 ## 8. 当前端到端状态
 
-环境与源码安装脚本已经具备，但当前 `camera-create` 推理实现仍在 Pi3X 进程内加载
-MoGe-2。下一步必须实现 Pi3X worker 和 MoGe-3 worker，再由主 CLI 使用上述解释器
-路径启动子进程。完成前可以验证三个模型环境，但不能声称三环境 metric camera
-端到端已经跑通。
+主 CLI 已分别调用以下程序：
+
+```text
+.envs/pi3x/bin/python  scripts/run_pi3x_worker.py
+.envs/moge3/bin/python scripts/run_moge3_worker.py
+.envs/vipe/bin/vipe    infer ...
+```
+
+调用示例：
+
+```bash
+.envs/pi3x/bin/python cli.py \
+  --input /data/input.mp4 \
+  --output /data/camera-result \
+  --pi3x-python .envs/pi3x/bin/python \
+  --moge3-python .envs/moge3/bin/python \
+  --vipe-command .envs/vipe/bin/vipe
+```
+
+主进程依次运行两个深度 worker，确保同一时刻只有一个深度模型占用 GPU；worker
+退出后才加载 NPZ 并融合。隔离逻辑和缓存契约已由无模型测试覆盖，但真实模型、
+显存峰值、VIPE CUDA 扩展以及最终 metric 精度仍需要在目标服务器验证。

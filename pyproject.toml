@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "camera-create"
 version = "0.1.0"
-description = "Metric camera calibration from video using Pi3X, MoGe-2, and NVIDIA VIPE"
+description = "Metric camera calibration from video using isolated Pi3X, MoGe-3, and NVIDIA VIPE workers"
 requires-python = ">=3.10,<3.15"
 dependencies = [
   "numpy>=1.24",
   "scipy>=1.10",
-  "opencv-python-headless>=4.8",
+  "opencv-python>=4.8",
   "torch>=2.4",
   "torchvision>=0.19",
   "tqdm>=4.66",

@@ -15,17 +15,17 @@ class ModelPaths:
     """Filesystem locations for the three model components."""
 
     pi3x: Path
-    moge2: Path
+    moge3: Path
     vipe: Path
 
     @classmethod
     def defaults(cls, ckpt_root: Path | None = None) -> ModelPaths:
         root = (ckpt_root or PROJECT_ROOT / "ckpt").resolve()
-        return cls(root / "pi3x", root / "moge2", root / "vipe")
+        return cls(root / "pi3x", root / "moge3", root / "vipe")
 
     def validate_depth_models(self) -> None:
         missing = []
-        for path in (self.pi3x, self.moge2):
+        for path in (self.pi3x, self.moge3):
             populated = path.is_file() or (
                 path.is_dir()
                 and any(item.name != ".gitkeep" for item in path.iterdir())

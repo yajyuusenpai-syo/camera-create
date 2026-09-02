@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import ModelPaths
 from .pipeline import CameraCreatePipeline, PipelineOptions
+from .worker_runner import default_environment_executable
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -21,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ckpt-root", type=Path, help="Default: camera_create/ckpt")
     parser.add_argument("--pi3x-ckpt", type=Path, help="Override Pi3X checkpoint path")
     parser.add_argument(
-        "--moge2-ckpt", type=Path, help="Override MoGe-2 checkpoint path"
+        "--moge3-ckpt", type=Path, help="Override MoGe-3 checkpoint path"
     )
     parser.add_argument(
         "--device", default="cuda", help="Torch device, normally cuda or cuda:0"
@@ -39,7 +40,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Copy intermediate cache/VIPE data into output/work",
     )
-    parser.add_argument("--vipe-command", default="vipe")
+    parser.add_argument(
+        "--pi3x-python",
+        type=Path,
+        default=default_environment_executable("pi3x"),
+        help="Python executable from the isolated Pi3X environment",
+    )
+    parser.add_argument(
+        "--moge3-python",
+        type=Path,
+        default=default_environment_executable("moge3"),
+        help="Python executable from the isolated MoGe-3 environment",
+    )
+    parser.add_argument(
+        "--vipe-command",
+        default=str(default_environment_executable("vipe", "vipe")),
+        help="VIPE executable from the isolated VIPE environment",
+    )
+    parser.add_argument("--moge3-refine-steps", type=int, default=3)
+    parser.add_argument(
+        "--moge3-no-fp16", action="store_true", help="Disable MoGe-3 mixed precision"
+    )
     parser.add_argument("--verbose", action="store_true")
     return parser
 
@@ -54,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     defaults = ModelPaths.defaults(args.ckpt_root)
     models = ModelPaths(
         pi3x=(args.pi3x_ckpt or defaults.pi3x).resolve(),
-        moge2=(args.moge2_ckpt or defaults.moge2).resolve(),
+        moge3=(args.moge3_ckpt or defaults.moge3).resolve(),
         vipe=defaults.vipe,
     )
     options = PipelineOptions(
@@ -65,7 +86,11 @@ def main(argv: list[str] | None = None) -> int:
         max_inference_side=args.max_inference_side,
         fov_x_deg=args.fov_x_deg,
         keep_work=args.keep_work,
+        pi3x_python=args.pi3x_python,
+        moge3_python=args.moge3_python,
         vipe_command=args.vipe_command,
+        moge3_refine_steps=args.moge3_refine_steps,
+        moge3_fp16=not args.moge3_no_fp16,
     )
     report = CameraCreatePipeline(models, options).run(
         args.input, args.output, args.work_dir

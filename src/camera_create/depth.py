@@ -1,4 +1,4 @@
-"""Run Pi3X and MoGe-2 and fuse their depths into a metric cache for VIPE."""
+"""Run Pi3X inference helpers and fuse Pi3X/MoGe-3 depths for VIPE."""
 
 from __future__ import annotations
 
@@ -33,22 +33,6 @@ def load_pi3x(checkpoint: Path, device: str):
     return Pi3X.from_pretrained(str(checkpoint)).to(device).eval()
 
 
-def load_moge2(checkpoint: Path, device: str):
-    """Load MoGe-2 from a directory or a direct model.pt checkpoint."""
-    try:
-        from moge.model.v2 import MoGeModel  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "MoGe-2 package is not installed; see docs/DEPLOYMENT.md"
-        ) from exc
-    model_path = (
-        checkpoint / "model.pt"
-        if checkpoint.is_dir() and (checkpoint / "model.pt").exists()
-        else checkpoint
-    )
-    return MoGeModel.from_pretrained(str(model_path)).to(device).eval()
-
-
 def infer_pi3x(
     model, frames_rgb: np.ndarray, device: str, chunk: int, stride: int
 ) -> np.ndarray:
@@ -77,50 +61,22 @@ def infer_pi3x(
     return accum / np.maximum(counts[:, None, None], 1.0)
 
 
-def infer_moge2(
-    model, frames_rgb: np.ndarray, device: str, fov_x_deg: float
-) -> np.ndarray:
-    """Infer per-frame MoGe-2 metric depth while keeping only one frame on GPU."""
-    import torch
-
-    output_depths: list[np.ndarray] = []
-    with torch.inference_mode():
-        for index, frame in enumerate(frames_rgb):
-            if index % 50 == 0:
-                LOG.info("MoGe-2 frame %d/%d", index, len(frames_rgb))
-            tensor = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0)
-            tensor = tensor.to(device=device, dtype=torch.float32).div_(255.0)
-            result = model.infer(tensor, fov_x=fov_x_deg)
-            depth_tensor = result["depth"].squeeze().float()
-            if tuple(depth_tensor.shape[-2:]) != tuple(frame.shape[:2]):
-                depth_tensor = torch.nn.functional.interpolate(
-                    depth_tensor[None, None],
-                    size=frame.shape[:2],
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze()
-            depth = depth_tensor.cpu().numpy()
-            output_depths.append(depth.astype(np.float32, copy=False))
-            del tensor, result
-    return np.stack(output_depths)
-
-
 def fuse_metric_depths(
     pi3x_depth: np.ndarray,
-    moge2_depth: np.ndarray,
+    moge3_depth: np.ndarray,
     momentum: float = 0.99,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply inverse-depth weighted scale recovery followed by temporal EMA."""
-    if pi3x_depth.shape != moge2_depth.shape:
+    if pi3x_depth.shape != moge3_depth.shape:
         raise ValueError(
-            f"Depth shape mismatch: {pi3x_depth.shape} vs {moge2_depth.shape}"
+            f"Depth shape mismatch: {pi3x_depth.shape} vs {moge3_depth.shape}"
         )
     if not 0.0 <= momentum < 1.0:
         raise ValueError("EMA momentum must be in [0, 1)")
     raw = np.full(len(pi3x_depth), np.nan, dtype=np.float32)
     smooth = np.full(len(pi3x_depth), np.nan, dtype=np.float32)
     previous: float | None = None
-    for index, (consistent, metric) in enumerate(zip(pi3x_depth, moge2_depth)):
+    for index, (consistent, metric) in enumerate(zip(pi3x_depth, moge3_depth)):
         valid = (
             np.isfinite(consistent)
             & np.isfinite(metric)
@@ -141,7 +97,7 @@ def fuse_metric_depths(
             )
         elif previous is None:
             raise RuntimeError(
-                f"No valid Pi3X/MoGe-2 overlap in first usable frame (frame {index})"
+                f"No valid Pi3X/MoGe-3 overlap in first usable frame (frame {index})"
             )
         smooth[index] = previous
     fused = pi3x_depth * smooth[:, None, None]

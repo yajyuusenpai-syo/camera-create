@@ -25,7 +25,6 @@ ckpt/
 VIPE is source code plus its own downloaded model cache rather than one single
 checkpoint. `ckpt/vipe/` is reserved for an optional explicit VIPE cache.
 
-The target deployment uses three isolated Python 3.10 environments (Pi3X,
-MoGe-3, and VIPE). The current implementation still contains the original
-in-process MoGe-2 backend; see `docs/DEPLOYMENT.md` for the migration status and
-do not treat the three-environment path as GPU-validated yet.
+The pipeline invokes Pi3X, MoGe-3, and VIPE through three isolated Python 3.10
+environments and exchanges validated NPZ caches between processes. See
+`docs/DEPLOYMENT.md`; real-model GPU accuracy still requires server validation.

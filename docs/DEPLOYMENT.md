@@ -80,7 +80,10 @@ VIPE checkout，然后使用当前 Python 环境进行 editable install。运行
 python cli.py \
   --input /data/input.mp4 \
   --output /data/camera_result \
-  --device cuda:0
+  --device cuda:0 \
+  --pi3x-python .envs/pi3x/bin/python \
+  --moge3-python .envs/moge3/bin/python \
+  --vipe-command .envs/vipe/bin/vipe
 ```
 
 或安装项目后：
@@ -101,9 +104,9 @@ python cli.py --input input.mp4 --output result \
 
 已知相机水平 FOV 时应传入 `--fov-x-deg`，可提高 MoGe-3 的尺度/内参一致性。
 
-> 当前实现状态：现有 CLI 尚未实现 Pi3X、MoGe-3 两个独立 worker，仍直接加载
-> MoGe-2。完成 worker 改造前，上述三环境命令是部署规范，不代表当前提交已经能
-> 以三环境完成真实端到端推理。
+CLI 已实现 Pi3X、MoGe-3 和 VIPE 的独立子进程调用。默认路径就是上面三个
+`.envs` 可执行文件，也可以省略显式参数。隔离调度已有单元测试，但真实 CUDA 模型
+端到端仍需服务器 smoke test，不能仅凭无 GPU 测试宣称 metric 精度已经验证。
 
 ## 5. Metric 含义与限制
 

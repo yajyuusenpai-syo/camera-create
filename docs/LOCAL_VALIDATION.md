@@ -33,6 +33,6 @@ pip check: No broken requirements found
 - `ckpt/pi3x` 与 `ckpt/moge3` 模型文件。
 
 因此本次结论是 Python 项目、CLI、数学处理和输出插值的标准验证通过，不能将其
-表述为 Pi3X + MoGe-3 + VIPE 真实模型端到端验证通过。当前代码仍为 MoGe-2
-同进程实现，三环境 worker 改造也尚未完成。完成改造后，应分别检查三个环境，
+表述为 Pi3X + MoGe-3 + VIPE 真实模型端到端验证通过。三环境 worker 调度和缓存
+校验已经实现并可在无 GPU 条件下测试；部署 GPU 环境后仍须分别检查三个环境，
 再执行真实视频 smoke test。

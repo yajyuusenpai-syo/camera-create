@@ -49,6 +49,7 @@ output = model.infer(image, refine_steps=3, use_fp16=True)
 MoGe-3 checkpoint 必须显式提供。最终缓存只消费最后一次 refinement 的 `depth`、
 `intrinsics` 和 `mask`；`*_per_step` 仅用于调试，不进入 VIPE。
 
-截至本文档更新时，仓库现有 `depth.py` 仍直接导入 MoGe-2 并与 Pi3X 同进程运行。
-因此三环境内容是已确定的迁移目标；在 MoGe-3 worker 和 Pi3X worker 落地之前，
-不得把当前 CLI 标记为三环境端到端已验证。
+`scripts/run_pi3x_worker.py` 与 `scripts/run_moge3_worker.py` 已实现上述隔离边界。
+主进程通过 `worker_runner.py` 启动指定解释器，并在融合前校验两个缓存的帧数、
+原始尺寸、推理尺寸、形状和正深度有效性。当前隔离调度与无模型单元测试已通过；
+真实模型和 VIPE CUDA 端到端仍须在 Linux GPU 服务器完成 smoke test。
