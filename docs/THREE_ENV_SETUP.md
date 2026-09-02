@@ -216,6 +216,17 @@ source .envs/vipe/bin/activate
   的 `python -m pip` 安装；可安装 `mamba`，但不是必需。
 - `CondaError: Run 'conda init'`：脚本使用 `conda run --prefix`，正常情况下无需
   `conda init`；检查 `CONDA_COMMAND` 是否指向真实的 Conda 可执行文件。
+- 安装日志出现与本项目无关的 `deepfilternet`、`evo` 或系统 `matplotlib` 冲突：
+  表示 base/user-site 包通过 `PYTHONPATH` 或 `~/.local` 泄漏。新版脚本会自动清除
+  `PYTHONPATH/PYTHONHOME/PIP_USER` 并设置 `PYTHONNOUSERSITE=1`。旧终端可先执行：
+
+  ```bash
+  unset PYTHONPATH PYTHONHOME PIP_USER
+  export PYTHONNOUSERSITE=1
+  ENV_ROOT="$PWD/.conda-envs-clean" bash scripts/setup_three_conda_envs.sh
+  ```
+
+  不要为了消除提示而把 `deepfilternet`、`evo` 安装进模型环境。
 
 ## 9. 当前端到端状态
 

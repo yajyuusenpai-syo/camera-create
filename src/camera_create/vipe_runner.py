@@ -72,7 +72,20 @@ def run_vipe(
         "HF_HOME": str((model_cache / "huggingface").resolve()),
         "TORCH_HOME": str((model_cache / "torch").resolve()),
     }
+    process_env = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
+        process_env.pop(name, None)
+    process_env["PYTHONNOUSERSITE"] = "1"
     with _model_cache_environment(cache_env), _temporary_environment(
         "SANA_WM_CACHED_DEPTH_PATH", str(cache_path.resolve())
     ):
-        subprocess.run(args, check=True)
+        process_env.update(
+            {
+                "HF_HOME": os.environ["HF_HOME"],
+                "TORCH_HOME": os.environ["TORCH_HOME"],
+                "SANA_WM_CACHED_DEPTH_PATH": os.environ[
+                    "SANA_WM_CACHED_DEPTH_PATH"
+                ],
+            }
+        )
+        subprocess.run(args, check=True, env=process_env)

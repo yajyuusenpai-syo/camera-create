@@ -14,8 +14,16 @@ def run_probe(python: Path, source: str) -> tuple[bool, str]:
     """Run a JSON-emitting probe in one isolated interpreter."""
     if not python.is_file():
         return False, f"interpreter missing: {python}"
+    environment = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
     result = subprocess.run(
-        [str(python), "-c", source], capture_output=True, text=True, check=False
+        [str(python), "-c", source],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
     )
     detail = (result.stdout or result.stderr).strip()
     return result.returncode == 0, detail

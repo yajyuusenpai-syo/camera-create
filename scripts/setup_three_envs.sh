@@ -2,6 +2,13 @@
 # Create isolated Pi3X, MoGe-3, and VIPE Python environments and install each model.
 set -euo pipefail
 
+# Prevent system/user Python packages from leaking into model virtual environments.
+unset PYTHONPATH
+unset PYTHONHOME
+unset PIP_USER
+export PYTHONNOUSERSITE=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_COMMAND="${PYTHON_COMMAND:-python3.10}"
 ENV_ROOT="${ENV_ROOT:-${PROJECT_ROOT}/.envs}"

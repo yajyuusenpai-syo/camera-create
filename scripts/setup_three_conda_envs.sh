@@ -2,6 +2,13 @@
 # Create isolated Pi3X, MoGe-3, and VIPE Conda-prefix environments for restricted servers.
 set -euo pipefail
 
+# Prevent base/user Python packages from leaking into Conda-prefix environments.
+unset PYTHONPATH
+unset PYTHONHOME
+unset PIP_USER
+export PYTHONNOUSERSITE=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA_COMMAND="${CONDA_COMMAND:-conda}"
 ENV_ROOT="${ENV_ROOT:-${PROJECT_ROOT}/.envs}"
@@ -33,7 +40,8 @@ create_env() {
 run_python() {
   local path="$1"
   shift
-  "${CONDA_COMMAND}" run --prefix "${path}" python "$@"
+  env -u PYTHONPATH -u PYTHONHOME -u PIP_USER PYTHONNOUSERSITE=1 \
+    "${CONDA_COMMAND}" run --prefix "${path}" python "$@"
 }
 
 mkdir -p "${ENV_ROOT}"

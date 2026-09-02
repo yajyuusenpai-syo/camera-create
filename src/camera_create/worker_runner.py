@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -45,8 +46,12 @@ def _require_executable(path: Path, model: str) -> Path:
 
 
 def _run(args: list[str], model: str) -> None:
+    environment = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
     try:
-        subprocess.run(args, check=True)
+        subprocess.run(args, check=True, env=environment)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"{model} worker failed with exit code {exc.returncode}") from exc
 

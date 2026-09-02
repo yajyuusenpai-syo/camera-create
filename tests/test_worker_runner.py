@@ -57,8 +57,10 @@ def test_pi3x_worker_uses_selected_interpreter(
     output = tmp_path / "result.npz"
     invoked: list[str] = []
 
-    def fake_run(args: list[str], check: bool) -> None:
+    def fake_run(args: list[str], check: bool, env: dict[str, str]) -> None:
         assert check
+        assert env["PYTHONNOUSERSITE"] == "1"
+        assert "PYTHONPATH" not in env
         invoked.extend(args)
         write_cache(output)
 
