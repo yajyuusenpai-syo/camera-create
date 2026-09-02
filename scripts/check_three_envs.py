@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -47,13 +48,20 @@ def main() -> int:
         ok, detail = run_probe(python, source)
         all_ok &= ok
         print(f"[{'OK' if ok else 'FAILED'}] {name}: {detail}")
-    for name in (() if args.skip_checkpoints else ("pi3x", "moge3", "vipe")):
+    for name in (() if args.skip_checkpoints else ("pi3x", "moge3")):
         checkpoint = project_root / "ckpt" / name
         populated = checkpoint.is_dir() and any(
             item.name != ".gitkeep" for item in checkpoint.iterdir()
         )
         print(f"[{'OK' if populated else 'MISSING'}] checkpoint {name}: {checkpoint}")
         all_ok &= populated
+    vipe_cache = project_root / "ckpt" / "vipe"
+    vipe_cache_ready = vipe_cache.is_dir() and os.access(vipe_cache, os.W_OK)
+    print(
+        f"[{'OK' if vipe_cache_ready else 'MISSING'}] writable VIPE cache: "
+        f"{vipe_cache}"
+    )
+    all_ok &= vipe_cache_ready
     print(json.dumps({"ready": all_ok, "env_root": str(env_root)}))
     return 0 if all_ok else 1
 

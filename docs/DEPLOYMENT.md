@@ -3,6 +3,10 @@
 完整的源码克隆、三套 `venv` 创建、CUDA wheel 选择、checkpoint 放置和环境排错见
 [`THREE_ENV_SETUP.md`](THREE_ENV_SETUP.md)。本页说明架构选择和调用约定。
 
+- 公司服务器：`bash scripts/setup_three_envs.sh`（标准 Python `venv`）。
+- 测试服务器：`bash scripts/setup_three_conda_envs.sh`（三个 Conda prefix）。
+- 两者都生成 `.envs/pi3x`、`.envs/moge3`、`.envs/vipe`，不要混用安装脚本。
+
 ## 1. 部署结论
 
 - Linux 推荐；VIPE 含 CUDA 扩展，Windows 原生环境通常不适合作为生产环境。
@@ -31,7 +35,9 @@ VIPE 还需要独立编译 CUDA 扩展。三个阶段通过 NPZ/JSON 文件衔�
 
 ```bash
 bash scripts/clone_models.sh
+# 二选一：
 bash scripts/setup_three_envs.sh
+# bash scripts/setup_three_conda_envs.sh
 ```
 
 将模型放在以下固定目录：

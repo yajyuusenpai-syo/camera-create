@@ -11,7 +11,8 @@ video -> Pi3X temporal depth -> MoGe-3 metric anchor -> EMA fusion
 The primary entry point is `cli.py`; the package also installs the
 `camera-create` command. See `docs/DEPLOYMENT.md` for installation and usage.
 For exact source cloning and isolated environment commands, see
-`docs/THREE_ENV_SETUP.md`.
+`docs/THREE_ENV_SETUP.md`. Both standard `venv` and Conda-prefix installation
+scripts are provided; they create the same `.envs/<model>` runtime layout.
 
 Checkpoint layout:
 

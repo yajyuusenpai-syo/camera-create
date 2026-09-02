@@ -1,8 +1,10 @@
 # 三模型隔离环境安装
 
 本文面向 Linux + NVIDIA GPU 服务器。Pi3X、MoGe-3 和 VIPE 分别安装到独立
-Python 3.10 `venv`；`camera-create` 主控程序安装在 Pi3X 环境中。上游源码、虚拟
-环境和权重均被 `.gitignore` 排除，不会上传到 camera-create 仓库。
+Python 3.10 环境；`camera-create` 主控程序安装在 Pi3X 环境中。公司服务器推荐
+标准 `venv`，只能使用 Conda 的测试服务器使用 Conda prefix 备选方案。两种脚本
+生成相同的 `.envs` 布局，CLI 调用方式不变。上游源码、环境和权重均被
+`.gitignore` 排除，不会上传到 camera-create 仓库。
 
 ## 1. 系统准备
 
@@ -57,7 +59,7 @@ bash scripts/clone_models.sh
 脚本采用 detached checkout，避免误把上游修改提交进本项目。每次部署都应保存
 `SOURCE_VERSIONS.txt` 到实验记录中。
 
-## 4. 创建三个 Python 环境
+## 4. 公司服务器：标准 venv 方案
 
 默认 wheel 组合为 Pi3X/cu124、MoGe-3/cu130、VIPE/cu128：
 
@@ -97,7 +99,67 @@ bash scripts/setup_three_envs.sh
 
 `SOURCE_ROOT` 在克隆与安装两个脚本中必须保持一致。
 
-## 5. 放置 checkpoint
+## 5. 测试服务器：Conda 备选方案
+
+不要先运行 `setup_three_envs.sh`；直接使用 Conda 脚本创建同样的三个隔离路径：
+
+```bash
+bash scripts/clone_models.sh
+bash scripts/setup_three_conda_envs.sh
+```
+
+脚本使用 `conda create --prefix`，不会污染 Conda 的 base 环境：
+
+```text
+camera-create/.envs/
+├── pi3x/   # 独立 Conda prefix
+├── moge3/  # 独立 Conda prefix
+└── vipe/   # 独立 Conda prefix
+```
+
+如果 `conda` 不在 `PATH`：
+
+```bash
+CONDA_COMMAND=/opt/conda/bin/conda \
+bash scripts/setup_three_conda_envs.sh
+```
+
+CUDA wheel 同样可以分别覆盖。例如测试服务器统一使用 cu128 时：
+
+```bash
+MOGE_TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 \
+VIPE_TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128 \
+bash scripts/setup_three_conda_envs.sh
+```
+
+Pi3X 仍建议保留 Torch 2.5.1/cu124，因为这是其官方固定版本。只有确认服务器驱动不
+支持 cu124 时，才修改 `PI3_TORCH_INDEX_URL`，并重新执行真实模型验证。
+
+不需要 `conda activate`，直接使用 prefix 中的解释器最稳定：
+
+```bash
+.envs/pi3x/bin/python cli.py --help
+.envs/moge3/bin/python -c "from moge.model.v3 import MoGeModel; print('OK')"
+.envs/vipe/bin/vipe --help
+```
+
+如需手动进入环境：
+
+```bash
+conda activate "$(pwd)/.envs/pi3x"
+conda deactivate
+```
+
+注意：`setup_three_envs.sh` 与 `setup_three_conda_envs.sh` 不能对同一个已存在的
+`.envs` 混用。如果需要切换方案，应使用新的 `ENV_ROOT`，例如：
+
+```bash
+ENV_ROOT=/data/camera-conda-envs bash scripts/setup_three_conda_envs.sh
+```
+
+此时运行 CLI 必须显式传入三个绝对路径。
+
+## 6. 放置 checkpoint
 
 ```text
 camera-create/ckpt/
@@ -110,7 +172,7 @@ camera-create/ckpt/
 指向 `ckpt/moge3` 中的 checkpoint。若模型页面需要接受许可，先在个人电脑完成授权，
 再下载并 `scp -r` 到服务器，服务器无需保存 Hugging Face token。
 
-## 6. 验证隔离状态
+## 7. 验证隔离状态
 
 权重放置前只检查软件环境：
 
@@ -129,7 +191,7 @@ camera-create/ckpt/
 该脚本分别启动三个解释器，不会在同一进程导入三套 Torch/NumPy。三项均应显示
 `cuda: true`；Pi3X 应显示 NumPy 1.26.4，MoGe-3 应显示 NumPy 2.x。
 
-## 7. 激活和排错
+## 8. 激活和排错
 
 手动进入某个环境：
 
@@ -150,8 +212,12 @@ source .envs/vipe/bin/activate
 - MoGe-3 无法加载 FlexGEMM/Triton：确认 Linux、NVIDIA GPU 和所选 Torch CUDA
   wheel 兼容；MoGe-3 不支持 macOS。
 - `numpy` 冲突：确认命令使用的是 `.envs/<model>/bin/python`，不要使用裸 `pip`。
+- Conda 求解很慢：脚本只用 Conda 创建 Python 3.10 prefix，模型依赖仍由各 prefix
+  的 `python -m pip` 安装；可安装 `mamba`，但不是必需。
+- `CondaError: Run 'conda init'`：脚本使用 `conda run --prefix`，正常情况下无需
+  `conda init`；检查 `CONDA_COMMAND` 是否指向真实的 Conda 可执行文件。
 
-## 8. 当前端到端状态
+## 9. 当前端到端状态
 
 主 CLI 已分别调用以下程序：
 
