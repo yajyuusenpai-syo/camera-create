@@ -312,7 +312,10 @@ source .envs/vipe/bin/activate
     torch==2.9.0+cu128 torchvision==0.24.0+cu128 \
     --index-url https://download.pytorch.org/whl/cu128 \
     --extra-index-url https://pypi.org/simple
-  CUDA_HOME="$PWD/.envs/vipe" PATH="$PWD/.envs/vipe/bin:$PATH" \
+  CONDA_PREFIX="$PWD/.envs/vipe" \
+  CUDA_HOME="$PWD/.envs/vipe" \
+  PYTORCH_NVCC="$PWD/.envs/vipe/bin/nvcc" \
+  PATH="$PWD/.envs/vipe/bin:$PATH" \
     .envs/vipe/bin/python scripts/setup_vipe.py \
     --vipe-source third_party/vipe \
     --constraint requirements/vipe-constraints.txt
@@ -321,6 +324,11 @@ source .envs/vipe/bin/activate
   cu130 -> cu128 的 Torch/CUDA wheel 必须下载一次，但 Conda、pip 缓存以及已安装的
   VIPE 普通依赖会复用；不会重新下载 Pi3X、MoGe-3 或其权重。若普通依赖已经完整，
   最后一条还可加 `--no-deps`，严格禁止 pip 再解析依赖。
+
+  如果终端仍显示 `(base)`，必须特别注意外层 `CONDA_PREFIX`。VIPE 官方 `setup.py`
+  会根据该变量设置 `PYTORCH_NVCC`；直接执行 `.envs/vipe/bin/python` 并不会自动把
+  `CONDA_PREFIX` 从 base 改成 vipe。新版 `setup_vipe.py` 会按 `sys.prefix` 自动纠正
+  三个 CUDA 环境变量；上面的显式写法也可用于修复尚未更新代码的服务器。
 - MoGe-3 无法加载 FlexGEMM/Triton：确认 Linux、NVIDIA GPU 和所选 Torch CUDA
   wheel 兼容；MoGe-3 不支持 macOS。
 - `numpy` 冲突：确认命令使用的是 `.envs/<model>/bin/python`，不要使用裸 `pip`。

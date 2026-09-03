@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,24 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PROJECT_ROOT.parent
+
+
+def vipe_build_environment() -> dict[str, str]:
+    """Select nvcc from the running Conda prefix instead of an outer base prefix."""
+    environment = os.environ.copy()
+    python_prefix = Path(sys.prefix).resolve()
+    prefix_nvcc = python_prefix / "bin" / "nvcc"
+    if prefix_nvcc.is_file():
+        # VIPE's setup.py trusts CONDA_PREFIX and derives PYTORCH_NVCC from it.
+        # Invoking prefix/bin/python while `(base)` is active otherwise leaks the
+        # base prefix and can silently select an old system/base CUDA compiler.
+        environment["CONDA_PREFIX"] = str(python_prefix)
+        environment["CUDA_HOME"] = str(python_prefix)
+        environment["PYTORCH_NVCC"] = str(prefix_nvcc)
+        environment["PATH"] = os.pathsep.join(
+            [str(prefix_nvcc.parent), environment.get("PATH", "")]
+        )
+    return environment
 
 
 def patch_factory(factory_path: Path) -> None:
@@ -79,7 +98,7 @@ def main() -> int:
         if args.no_deps:
             command.append("--no-deps")
         command.extend(["-e", str(vipe_source)])
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, env=vipe_build_environment())
     print(f"VIPE cached-depth integration ready at {vipe_source}")
     return 0
 
