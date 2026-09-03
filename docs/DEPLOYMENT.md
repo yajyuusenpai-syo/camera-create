@@ -6,6 +6,8 @@
 - 公司服务器：`bash scripts/setup_three_envs.sh`（标准 Python `venv`）。
 - 测试服务器：`bash scripts/setup_three_conda_envs.sh`（三个 Conda prefix）。
 - 两者都生成 `.envs/pi3x`、`.envs/moge3`、`.envs/vipe`，不要混用安装脚本。
+- VIPE v1.2.0 固定使用官方 Torch 2.9.0/cu128 组合；Conda 脚本会把匹配的 CUDA
+  Toolkit 12.8 安装在 VIPE prefix 内，公司 venv 方案则需系统提供 nvcc 12.8。
 
 ## 1. 部署结论
 

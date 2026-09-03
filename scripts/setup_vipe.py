@@ -43,6 +43,16 @@ def main() -> int:
     parser.add_argument(
         "--vipe-source", type=Path, default=REPOSITORY_ROOT / "third_party" / "vipe"
     )
+    parser.add_argument(
+        "--constraint",
+        type=Path,
+        help="Optional pip constraint file used while installing VIPE.",
+    )
+    parser.add_argument(
+        "--no-deps",
+        action="store_true",
+        help="Do not resolve dependencies; useful when repairing an existing environment.",
+    )
     parser.add_argument("--skip-install", action="store_true")
     args = parser.parse_args()
     vipe_source = args.vipe_source.resolve()
@@ -57,18 +67,19 @@ def main() -> int:
     )
     patch_factory(depth_dir / "__init__.py")
     if not args.skip_install:
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-build-isolation",
-                "-e",
-                str(vipe_source),
-            ],
-            check=True,
-        )
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-build-isolation",
+        ]
+        if args.constraint:
+            command.extend(["--constraint", str(args.constraint.resolve())])
+        if args.no_deps:
+            command.append("--no-deps")
+        command.extend(["-e", str(vipe_source)])
+        subprocess.run(command, check=True)
     print(f"VIPE cached-depth integration ready at {vipe_source}")
     return 0
 

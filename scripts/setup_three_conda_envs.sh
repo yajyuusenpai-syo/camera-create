@@ -16,6 +16,11 @@ SOURCE_ROOT="${SOURCE_ROOT:-${PROJECT_ROOT}/third_party}"
 PI3_TORCH_INDEX_URL="${PI3_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
 MOGE_TORCH_INDEX_URL="${MOGE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 VIPE_TORCH_INDEX_URL="${VIPE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+VIPE_TORCH_VERSION="${VIPE_TORCH_VERSION:-2.9.0+cu128}"
+VIPE_TORCHVISION_VERSION="${VIPE_TORCHVISION_VERSION:-0.24.0+cu128}"
+VIPE_CONDA_CUDA_TOOLKIT_VERSION="${VIPE_CONDA_CUDA_TOOLKIT_VERSION:-12.8}"
+INSTALL_VIPE_CONDA_CUDA_TOOLKIT="${INSTALL_VIPE_CONDA_CUDA_TOOLKIT:-1}"
+VIPE_CUDA_HOME="${VIPE_CUDA_HOME:-}"
 
 if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" || ! -d "${SOURCE_ROOT}/utils3d-moge/.git" || ! -d "${SOURCE_ROOT}/pipeline/.git" || ! -d "${SOURCE_ROOT}/FlexGEMM/.git" ]]; then
   echo "Missing upstream source. Run scripts/clone_models.sh first." >&2
@@ -73,12 +78,30 @@ run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/FlexGEMM"
 run_python "${ENV_ROOT}/moge3" -m pip install --no-deps -e "${SOURCE_ROOT}/MoGe"
 
 echo "[3/4] Installing VIPE Torch and compiling VIPE CUDA extensions"
-# VIPE compiles CUDA extensions against the Torch installed in this prefix.
+# VIPE v1.2.0 officially locks Torch 2.9.0/cu128. Install a matching nvcc in the
+# Conda prefix so a stale system toolkit (for example /usr/local CUDA 11.5) cannot
+# be selected merely because nvidia-smi reports support for a newer CUDA runtime.
+if [[ "${INSTALL_VIPE_CONDA_CUDA_TOOLKIT}" == "1" ]]; then
+  "${CONDA_COMMAND}" install --prefix "${ENV_ROOT}/vipe" -c nvidia \
+    "cuda-toolkit=${VIPE_CONDA_CUDA_TOOLKIT_VERSION}" -y
+  VIPE_CUDA_HOME="${ENV_ROOT}/vipe"
+elif [[ -z "${VIPE_CUDA_HOME}" ]] && command -v nvcc >/dev/null 2>&1; then
+  VIPE_CUDA_HOME="$(cd "$(dirname "$(command -v nvcc)")/.." && pwd)"
+fi
+if [[ -z "${VIPE_CUDA_HOME}" || ! -x "${VIPE_CUDA_HOME}/bin/nvcc" ]]; then
+  echo "VIPE needs CUDA Toolkit 12.8 (nvcc), not only an NVIDIA driver." >&2
+  echo "Enable the prefix toolkit or set VIPE_CUDA_HOME=/path/to/cuda-12.8." >&2
+  exit 2
+fi
 run_python "${ENV_ROOT}/vipe" -m pip install \
-  torch torchvision \
+  "torch==${VIPE_TORCH_VERSION}" "torchvision==${VIPE_TORCHVISION_VERSION}" \
   --index-url "${VIPE_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
-run_python "${ENV_ROOT}/vipe" "${PROJECT_ROOT}/scripts/setup_vipe.py" \
-  --vipe-source "${SOURCE_ROOT}/vipe"
+env CUDA_HOME="${VIPE_CUDA_HOME}" PATH="${VIPE_CUDA_HOME}/bin:${PATH}" \
+  -u PYTHONPATH -u PYTHONHOME -u PIP_USER PYTHONNOUSERSITE=1 \
+  "${CONDA_COMMAND}" run --no-capture-output --prefix "${ENV_ROOT}/vipe" \
+  python "${PROJECT_ROOT}/scripts/setup_vipe.py" \
+  --vipe-source "${SOURCE_ROOT}/vipe" \
+  --constraint "${PROJECT_ROOT}/requirements/vipe-constraints.txt"
 
 mkdir -p "${PROJECT_ROOT}/ckpt/pi3x" "${PROJECT_ROOT}/ckpt/moge3" "${PROJECT_ROOT}/ckpt/vipe"
 echo "[4/4] Checking isolated imports and CUDA visibility"

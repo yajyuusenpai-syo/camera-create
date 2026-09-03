@@ -17,7 +17,19 @@ nvcc --version
 ```
 
 VIPE 会编译 CUDA 扩展，只有驱动而没有 CUDA toolkit/nvcc 的服务器不能完成其安装。
-先根据 `nvidia-smi` 和 `nvcc --version` 确定可用 CUDA，再选择 PyTorch wheel。
+`nvidia-smi` 顶部的 `CUDA Version` 只是驱动能够支持的最高 CUDA runtime，不代表
+本机安装了同版本 toolkit。编译时真正使用的是 `CUDA_HOME/bin/nvcc`；必须同时检查：
+
+```bash
+nvidia-smi
+which nvcc
+nvcc --version
+.envs/vipe/bin/python -c "import torch; print(torch.__version__, torch.version.cuda)"
+```
+
+VIPE v1.2.0 按官方 lock 固定为 Torch 2.9.0、TorchVision 0.24.0、cu128，因此
+编译它的 `nvcc` 也应为 CUDA 12.8。驱动显示 13.2 可以向后运行 cu128，并不要求
+安装 cu130；反之，系统残留的 nvcc 11.5 不能编译 cu128/cu130 PyTorch 扩展。
 
 ## 2. 获取 camera-create
 
@@ -87,7 +99,7 @@ bash scripts/setup_three_envs.sh
 camera-create/.envs/
 ├── pi3x/   # torch 2.5.1 + torchvision 0.20.1 + numpy 1.26.4
 ├── moge3/  # numpy >=2 + MoGe-3 + Triton/FlexGEMM
-└── vipe/   # VIPE v1.2.0 + CUDA Torch + 编译后的 CUDA 扩展
+└── vipe/   # VIPE v1.2.0 + torch 2.9.0/cu128 + 编译后的 CUDA 扩展
 ```
 
 默认 CUDA wheel 不一定适合所有服务器。安装前可独立覆盖：
@@ -102,6 +114,16 @@ bash scripts/setup_three_envs.sh
 MoGe-3 官方当前默认 CUDA 13.0，但也说明可重装为 cu128。选择 cu128 时仍保持它与
 Pi3X 环境隔离，解决 NumPy 2.x 与 1.26.4 冲突。不要把三个环境的 `site-packages`
 加入同一个 `PYTHONPATH`。
+
+公司服务器的系统 CUDA Toolkit 为 12.8 时，显式指向它可避免找到旧版 nvcc：
+
+```bash
+VIPE_CUDA_HOME=/usr/local/cuda-12.8 bash scripts/setup_three_envs.sh
+```
+
+若实际安装路径不同，以 `dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")"`
+的结果为准。venv 不包含 CUDA Toolkit，脚本只会使用 `VIPE_CUDA_HOME` 或当前
+`PATH` 中的 nvcc，并会在找不到它时提前报错。
 
 如需将环境放到高速数据盘：
 
@@ -130,6 +152,20 @@ camera-create/.envs/
 ├── moge3/  # 独立 Conda prefix
 └── vipe/   # 独立 Conda prefix
 ```
+
+Conda 脚本默认额外把 `cuda-toolkit=12.8` 安装进 `.envs/vipe`，设置
+`CUDA_HOME=.envs/vipe` 后再编译扩展。这会增加一次较大的下载，但可隔离服务器上
+遗留的 `/usr/local/cuda-11.5`，并与 VIPE 官方 cu128 PyTorch 精确匹配。若管理员
+已经提供可用的系统 CUDA 12.8，可跳过 Conda toolkit：
+
+```bash
+INSTALL_VIPE_CONDA_CUDA_TOOLKIT=0 \
+CUDA_HOME=/usr/local/cuda-12.8 \
+bash scripts/setup_three_conda_envs.sh
+```
+
+默认方案更适合当前测试服务器：驱动支持 CUDA 13.2 足以运行 cu128，而无需使用
+cu130，也不会改动 base 环境或 Pi3X/MoGe-3 环境。
 
 如果 `conda` 不在 `PATH`：
 
@@ -263,6 +299,28 @@ source .envs/vipe/bin/activate
 - `torch.cuda.is_available() == False`：wheel、驱动或 GPU 容器映射不匹配。
 - VIPE 安装时报 `torch.version.cuda is None`：误装了 CPU Torch。
 - VIPE 编译找不到 `nvcc`：安装匹配的 CUDA toolkit，并设置正确 `CUDA_HOME`。
+- VIPE 报 `detected CUDA 11.5` 与 `PyTorch 13.0` 不一致：前者是实际找到的 nvcc，
+  后者是 `torch.version.cuda`；`nvidia-smi` 显示 13.2 不能消除该冲突。新版 Conda
+  脚本会在 VIPE prefix 安装 Toolkit 12.8，并把 VIPE 锁到官方 cu128 组合。
+
+  只修复已经存在的 `.envs/vipe`，无需重装另外两个环境：
+
+  ```bash
+  conda install --prefix "$PWD/.envs/vipe" -c nvidia cuda-toolkit=12.8 -y
+  env -u PYTHONPATH -u PYTHONHOME -u PIP_USER PYTHONNOUSERSITE=1 \
+    .envs/vipe/bin/python -m pip install --upgrade \
+    torch==2.9.0+cu128 torchvision==0.24.0+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128 \
+    --extra-index-url https://pypi.org/simple
+  CUDA_HOME="$PWD/.envs/vipe" PATH="$PWD/.envs/vipe/bin:$PATH" \
+    .envs/vipe/bin/python scripts/setup_vipe.py \
+    --vipe-source third_party/vipe \
+    --constraint requirements/vipe-constraints.txt
+  ```
+
+  cu130 -> cu128 的 Torch/CUDA wheel 必须下载一次，但 Conda、pip 缓存以及已安装的
+  VIPE 普通依赖会复用；不会重新下载 Pi3X、MoGe-3 或其权重。若普通依赖已经完整，
+  最后一条还可加 `--no-deps`，严格禁止 pip 再解析依赖。
 - MoGe-3 无法加载 FlexGEMM/Triton：确认 Linux、NVIDIA GPU 和所选 Torch CUDA
   wheel 兼容；MoGe-3 不支持 macOS。
 - `numpy` 冲突：确认命令使用的是 `.envs/<model>/bin/python`，不要使用裸 `pip`。

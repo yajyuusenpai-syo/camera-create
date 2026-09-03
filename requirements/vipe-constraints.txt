@@ -1,0 +1,3 @@
+# Keep VIPE v1.2.0 on the CUDA 12.8 PyTorch versions pinned by its official uv.lock.
+torch==2.9.0+cu128
+torchvision==0.24.0+cu128

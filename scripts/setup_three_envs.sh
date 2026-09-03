@@ -16,10 +16,13 @@ SOURCE_ROOT="${SOURCE_ROOT:-${PROJECT_ROOT}/third_party}"
 PI3_TORCH_INDEX_URL="${PI3_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu124}"
 MOGE_TORCH_INDEX_URL="${MOGE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 VIPE_TORCH_INDEX_URL="${VIPE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+VIPE_TORCH_VERSION="${VIPE_TORCH_VERSION:-2.9.0+cu128}"
+VIPE_TORCHVISION_VERSION="${VIPE_TORCHVISION_VERSION:-0.24.0+cu128}"
 PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.org/simple}"
 PI3_WHEELHOUSE="${PI3_WHEELHOUSE:-}"
 MOGE_WHEELHOUSE="${MOGE_WHEELHOUSE:-}"
 VIPE_WHEELHOUSE="${VIPE_WHEELHOUSE:-}"
+VIPE_CUDA_HOME="${VIPE_CUDA_HOME:-}"
 
 if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" || ! -d "${SOURCE_ROOT}/utils3d-moge/.git" || ! -d "${SOURCE_ROOT}/pipeline/.git" || ! -d "${SOURCE_ROOT}/FlexGEMM/.git" ]]; then
   echo "Missing upstream source. Run scripts/clone_models.sh first." >&2
@@ -74,9 +77,20 @@ install_torch "${ENV_ROOT}/moge3/bin/python" "${MOGE_TORCH_INDEX_URL}" \
 
 # VIPE builds a CUDA extension during installation; nvcc and CUDA-enabled Torch are required.
 install_torch "${ENV_ROOT}/vipe/bin/python" "${VIPE_TORCH_INDEX_URL}" \
-  "${VIPE_WHEELHOUSE}" torch torchvision
-"${ENV_ROOT}/vipe/bin/python" "${PROJECT_ROOT}/scripts/setup_vipe.py" \
-  --vipe-source "${SOURCE_ROOT}/vipe"
+  "${VIPE_WHEELHOUSE}" "torch==${VIPE_TORCH_VERSION}" \
+  "torchvision==${VIPE_TORCHVISION_VERSION}"
+if [[ -z "${VIPE_CUDA_HOME}" ]] && command -v nvcc >/dev/null 2>&1; then
+  VIPE_CUDA_HOME="$(cd "$(dirname "$(command -v nvcc)")/.." && pwd)"
+fi
+if [[ -z "${VIPE_CUDA_HOME}" || ! -x "${VIPE_CUDA_HOME}/bin/nvcc" ]]; then
+  echo "VIPE needs CUDA Toolkit 12.8 (nvcc), not only an NVIDIA driver." >&2
+  echo "Set VIPE_CUDA_HOME=/path/to/cuda-12.8 and rerun this script." >&2
+  exit 2
+fi
+env CUDA_HOME="${VIPE_CUDA_HOME}" PATH="${VIPE_CUDA_HOME}/bin:${PATH}" \
+  "${ENV_ROOT}/vipe/bin/python" "${PROJECT_ROOT}/scripts/setup_vipe.py" \
+  --vipe-source "${SOURCE_ROOT}/vipe" \
+  --constraint "${PROJECT_ROOT}/requirements/vipe-constraints.txt"
 
 mkdir -p "${PROJECT_ROOT}/ckpt/pi3x" "${PROJECT_ROOT}/ckpt/moge3" "${PROJECT_ROOT}/ckpt/vipe"
 "${ENV_ROOT}/pi3x/bin/python" "${PROJECT_ROOT}/scripts/check_three_envs.py" \

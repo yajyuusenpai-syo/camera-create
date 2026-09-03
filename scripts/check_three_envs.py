@@ -48,7 +48,8 @@ def main() -> int:
         "moge3": "import json,numpy,torch; from moge.model.v3 import MoGeModel; "
         "print(json.dumps({'numpy':numpy.__version__,'torch':torch.__version__,'cuda':torch.cuda.is_available()}))",
         "vipe": "import json,torch,vipe; "
-        "print(json.dumps({'torch':torch.__version__,'cuda':torch.cuda.is_available()}))",
+        "print(json.dumps({'torch':torch.__version__,'torch_cuda':torch.version.cuda,"
+        "'cuda_available':torch.cuda.is_available()}))",
     }
     all_ok = True
     for name, source in probes.items():
