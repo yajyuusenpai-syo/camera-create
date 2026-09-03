@@ -17,7 +17,7 @@ PI3_TORCH_INDEX_URL="${PI3_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu1
 MOGE_TORCH_INDEX_URL="${MOGE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
 VIPE_TORCH_INDEX_URL="${VIPE_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 
-if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" ]]; then
+if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" || ! -d "${SOURCE_ROOT}/utils3d-moge/.git" || ! -d "${SOURCE_ROOT}/pipeline/.git" || ! -d "${SOURCE_ROOT}/FlexGEMM/.git" ]]; then
   echo "Missing upstream source. Run scripts/clone_models.sh first." >&2
   exit 2
 fi
@@ -65,7 +65,12 @@ echo "[2/4] Installing MoGe-3 Torch, dependencies, and source"
 run_python "${ENV_ROOT}/moge3" -m pip install \
   torch torchvision \
   --index-url "${MOGE_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
-run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/MoGe"
+run_python "${ENV_ROOT}/moge3" -m pip install \
+  -r "${PROJECT_ROOT}/requirements/moge3-runtime.txt"
+run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/utils3d-moge"
+run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/pipeline"
+run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/FlexGEMM"
+run_python "${ENV_ROOT}/moge3" -m pip install --no-deps -e "${SOURCE_ROOT}/MoGe"
 
 echo "[3/4] Installing VIPE Torch and compiling VIPE CUDA extensions"
 # VIPE compiles CUDA extensions against the Torch installed in this prefix.

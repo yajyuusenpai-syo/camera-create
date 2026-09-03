@@ -43,6 +43,9 @@ camera-create/third_party/
 ├── Pi3/
 ├── MoGe/
 ├── vipe/
+├── utils3d-moge/  # MoGe-3 pinned dependency
+├── pipeline/      # MoGe-3 pinned dependency
+├── FlexGEMM/      # MoGe-3 pinned dependency
 └── SOURCE_VERSIONS.txt
 ```
 
@@ -58,6 +61,17 @@ bash scripts/clone_models.sh
 
 脚本采用 detached checkout，避免误把上游修改提交进本项目。每次部署都应保存
 `SOURCE_VERSIONS.txt` 到实验记录中。
+
+MoGe-3 在官方 `pyproject.toml` 中通过 Git URL 固定了 `utils3d-moge`、`pipeline`
+和 `FlexGEMM`。本项目会预先克隆官方指定 commit，再从本地安装 MoGe，避免 pip
+安装过程中临时 clone 超时。Git 操作默认重试 3 次，可调整：
+
+```bash
+GIT_RETRIES=5 bash scripts/clone_models.sh
+```
+
+若目标服务器完全不能访问 GitHub，请在可联网机器运行 `clone_models.sh`，然后把
+整个 `third_party/` 目录打包上传；安装脚本不会再访问这三个 Git 依赖。
 
 ## 4. 公司服务器：标准 venv 方案
 
@@ -261,6 +275,9 @@ source .envs/vipe/bin/activate
 - PyTorch 安装报 `No matching distribution found for numpy`：旧脚本只配置了
   PyTorch CUDA index，而该索引不托管 NumPy。新版同时增加官方 PyPI 作为依赖
   回退源。无需删除环境；更新代码后重新运行同一个安装脚本，pip 会复用缓存。
+- MoGe-3 安装时报克隆 `utils3d-moge`、`pipeline` 或 `FlexGEMM` 超时：先运行新版
+  `clone_models.sh` 预取固定源码，再重跑环境脚本。新版使用本地 editable 安装及
+  `pip install --no-deps -e third_party/MoGe`，不会重新下载已经安装的 Torch。
 - `CondaError: Run 'conda init'`：脚本使用 `conda run --prefix`，正常情况下无需
   `conda init`；检查 `CONDA_COMMAND` 是否指向真实的 Conda 可执行文件。
 - 安装日志出现与本项目无关的 `deepfilternet`、`evo` 或系统 `matplotlib` 冲突：
