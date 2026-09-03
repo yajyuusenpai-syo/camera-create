@@ -7,6 +7,7 @@ import json
 import logging
 from pathlib import Path
 
+from .batch import DEFAULT_VIDEO_EXTENSIONS, BatchOptions, run_batch
 from .config import ModelPaths
 from .pipeline import CameraCreatePipeline, PipelineOptions
 from .worker_runner import default_environment_executable
@@ -17,8 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Estimate metric camera intrinsics/extrinsics from a video"
     )
-    parser.add_argument("--input", required=True, type=Path, help="Input video path")
-    parser.add_argument("--output", required=True, type=Path, help="Output directory")
+    parser.add_argument(
+        "--input", required=True, type=Path, help="Input video file or directory"
+    )
+    parser.add_argument(
+        "--output", type=Path, help="Single-video output directory; omit for batch mode"
+    )
     parser.add_argument("--ckpt-root", type=Path, help="Default: camera_create/ckpt")
     parser.add_argument("--pi3x-ckpt", type=Path, help="Override Pi3X checkpoint path")
     parser.add_argument(
@@ -62,7 +67,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--moge3-no-fp16", action="store_true", help="Disable MoGe-3 mixed precision"
     )
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--gpu-ids",
+        default="0",
+        help="Batch mode physical GPU ids, comma separated; for example 0,1,2,3",
+    )
+    parser.add_argument(
+        "--workers-per-gpu",
+        type=int,
+        default=1,
+        help="Batch pipelines per GPU; increase only after measuring VRAM",
+    )
+    parser.add_argument("--target-fps", type=float, default=24.0)
+    parser.add_argument("--max-video-seconds", type=float, default=10.06)
+    parser.add_argument(
+        "--video-extensions",
+        default=",".join(DEFAULT_VIDEO_EXTENSIONS),
+        help="Comma-separated extensions recursively discovered in batch mode",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        help="Batch checkpoint root; default: INPUT/.camera_create_ckpt",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Batch mode: recompute valid existing cam_<video>.json files",
+    )
+    parser.add_argument("--ffmpeg-command", default="ffmpeg")
     return parser
+
+
+def _parse_gpu_ids(value: str) -> tuple[int, ...]:
+    """Parse and validate a unique comma-separated physical GPU list."""
+    try:
+        values = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise ValueError(f"Invalid --gpu-ids value: {value}") from error
+    if (
+        not values
+        or any(value < 0 for value in values)
+        or len(set(values)) != len(values)
+    ):
+        raise ValueError("--gpu-ids must contain unique non-negative integers")
+    return values
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,8 +141,45 @@ def main(argv: list[str] | None = None) -> int:
         moge3_refine_steps=args.moge3_refine_steps,
         moge3_fp16=not args.moge3_no_fp16,
     )
+    input_path = args.input.resolve()
+    if input_path.is_dir():
+        if args.output is not None:
+            raise ValueError("--output must be omitted in directory batch mode")
+        if args.work_dir is not None or args.keep_work:
+            raise ValueError("--work-dir/--keep-work are only supported for one video")
+        extensions = tuple(
+            item.strip().lower()
+            for item in args.video_extensions.split(",")
+            if item.strip()
+        )
+        checkpoint_root = (
+            args.checkpoint_dir.resolve()
+            if args.checkpoint_dir
+            else input_path / ".camera_create_ckpt"
+        )
+        report = run_batch(
+            BatchOptions(
+                input_root=input_path,
+                checkpoint_root=checkpoint_root,
+                model_paths=models,
+                pipeline_options=options,
+                gpu_ids=_parse_gpu_ids(args.gpu_ids),
+                workers_per_gpu=args.workers_per_gpu,
+                target_fps=args.target_fps,
+                max_video_seconds=args.max_video_seconds,
+                extensions=extensions,
+                ffmpeg_command=args.ffmpeg_command,
+                overwrite=args.overwrite,
+            )
+        )
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 1 if report["failed"] or report["worker_crashes"] else 0
+    if not input_path.is_file():
+        raise FileNotFoundError(f"Input does not exist: {input_path}")
+    if args.output is None:
+        raise ValueError("--output is required when --input is one video file")
     report = CameraCreatePipeline(models, options).run(
-        args.input, args.output, args.work_dir
+        input_path, args.output, args.work_dir
     )
     print(json.dumps(report, indent=2))
     return 0

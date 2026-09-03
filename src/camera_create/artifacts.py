@@ -157,3 +157,58 @@ def export_camera_artifacts(
             f"Camera output failed validation; inspect {output_dir / 'camera_report.json'}"
         )
     return report
+
+
+def export_camera_json_v2(
+    result_dir: Path,
+    output_path: Path,
+    video_name: str,
+    source_fps: float,
+    target_fps: float,
+    max_video_seconds: float,
+) -> dict:
+    """Convert validated metric NPY artifacts into the per-frame JSON v2 contract."""
+    poses_path = result_dir / "poses_c2w_metric.npy"
+    intrinsics_path = result_dir / "intrinsics_K.npy"
+    report_path = result_dir / "camera_report.json"
+    if not poses_path.is_file() or not intrinsics_path.is_file():
+        raise FileNotFoundError(f"Metric camera artifacts are incomplete: {result_dir}")
+    poses = np.load(poses_path, allow_pickle=False)
+    intrinsics = np.load(intrinsics_path, allow_pickle=False)
+    if poses.shape != (len(poses), 4, 4):
+        raise ValueError(f"Unexpected c2w shape: {poses.shape}")
+    if intrinsics.shape != (len(poses), 3, 3):
+        raise ValueError(f"Unexpected intrinsics shape: {intrinsics.shape}")
+    if target_fps <= 0:
+        raise ValueError("target_fps must be positive")
+    if report_path.is_file():
+        validation = json.loads(report_path.read_text(encoding="utf-8"))
+        if not validation.get("valid", False):
+            raise RuntimeError(
+                f"Refusing to export invalid camera result: {report_path}"
+            )
+    payload = {
+        "format_version": 2,
+        "video_name": video_name,
+        "fps": float(target_fps),
+        "source_fps": float(source_fps),
+        "target_fps": float(target_fps),
+        "frame_count": len(poses),
+        "is_metric": True,
+        "max_video_seconds": float(max_video_seconds),
+        "camera_convention": "OpenCV: +X right, +Y down, +Z forward",
+        "frames": [
+            {
+                "frame_index": index,
+                "timestamp_seconds": index / float(target_fps),
+                "c2w": poses[index].astype(float).tolist(),
+                "intrinsics": intrinsics[index].astype(float).tolist(),
+            }
+            for index in range(len(poses))
+        ],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(output_path)
+    return payload
