@@ -63,6 +63,41 @@ def preflight_vipe_assets(model_cache: Path, allow_downloads: bool = False) -> N
         require_assets(vipe_torch_home(model_cache))
 
 
+def preflight_vipe_integration(command: str = "vipe") -> None:
+    """Verify v1.2 has the cached-depth frame-index backport before GPU work."""
+    executable = Path(find_vipe(command)).resolve()
+    python = executable.parent / ("python.exe" if os.name == "nt" else "python")
+    if not python.is_file():
+        raise RuntimeError(
+            f"Cannot locate the VIPE environment Python beside {executable}: {python}"
+        )
+    source = (
+        "from pathlib import Path; import vipe; "
+        "from vipe.priors.depth.base import DepthEstimationInput; "
+        "root=Path(vipe.__file__).resolve().parent; "
+        "buffer=(root/'slam/components/buffer.py').read_text(); "
+        "assert 'frame_idx' in DepthEstimationInput.__dataclass_fields__; "
+        "assert 'frame_idx=int(self.tstamp[frame_idx].item())' in buffer"
+    )
+    environment = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    result = subprocess.run(
+        [str(python), "-c", source],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "VIPE cached-depth frame-index patch is missing. Before inference run:\n"
+            "  .envs/vipe/bin/python scripts/setup_vipe.py "
+            "--vipe-source third_party/vipe --skip-install"
+        )
+
+
 def run_vipe(
     video: Path,
     output_dir: Path,

@@ -17,7 +17,11 @@ from .depth import (
     save_depth_cache,
 )
 from .stage_cache import StageCache, fingerprint, video_identity
-from .vipe_runner import preflight_vipe_assets, run_vipe
+from .vipe_runner import (
+    preflight_vipe_assets,
+    preflight_vipe_integration,
+    run_vipe,
+)
 from .worker_runner import (
     default_environment_executable,
     ensure_matching_workers,
@@ -71,6 +75,7 @@ class CameraCreatePipeline:
         preflight_vipe_assets(
             self.models.vipe, self.options.allow_vipe_downloads
         )
+        preflight_vipe_integration(self.options.vipe_command)
         owned_work = work_dir is None
         actual_work = (
             work_dir.resolve()

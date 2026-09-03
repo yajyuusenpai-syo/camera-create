@@ -96,6 +96,9 @@ def test_pipeline_reuses_all_completed_stages(
     monkeypatch.setattr("camera_create.pipeline.run_moge3_worker", fake_moge3)
     monkeypatch.setattr("camera_create.pipeline.run_vipe", fake_vipe)
     monkeypatch.setattr(
+        "camera_create.pipeline.preflight_vipe_integration", lambda *_args: None
+    )
+    monkeypatch.setattr(
         "camera_create.pipeline.export_camera_artifacts", lambda *_args: {"valid": True}
     )
     options = PipelineOptions(allow_vipe_downloads=True)
