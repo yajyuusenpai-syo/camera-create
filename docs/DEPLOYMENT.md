@@ -161,6 +161,18 @@ camera-create --input /data/input.mp4 --output /data/camera_result
 如需重复写入同一输出目录，普通结果文件会安全覆盖。使用 `--keep-work` 时，
 若已有 `output/work`，程序会停止并要求先由操作者确认如何处理旧中间结果。
 
+单视频运行会在 `OUTPUT/.camera_create_ckpt` 原子保存 Pi3X、MoGe-3、融合 metric
+depth 和 VIPE 阶段状态。如果 VIPE 或导出报错，使用完全相同的输入与关键参数重新执行
+原命令，会显示 `[resume]` 并跳过已经验证的阶段。输入文件、模型路径或推理参数变化
+会自动使旧缓存失效。成功后默认清理大型缓存；需要保留时使用：
+
+```bash
+.envs/pi3x/bin/python cli.py --input input.mp4 --output result --keep-stage-cache
+# 或将失败恢复点放到高速大容量磁盘
+.envs/pi3x/bin/python cli.py --input input.mp4 --output result \
+  --stage-cache-dir /fast-disk/camera-resume/input-001
+```
+
 显存不足时：
 
 ```bash

@@ -9,7 +9,6 @@ import os
 import queue
 import shutil
 import subprocess
-import tempfile
 import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -21,6 +20,7 @@ from tqdm import tqdm
 from .artifacts import export_camera_json_v2
 from .config import ModelPaths
 from .pipeline import CameraCreatePipeline, PipelineOptions
+from .stage_cache import video_identity
 
 DEFAULT_VIDEO_EXTENSIONS = (
     ".mp4",
@@ -50,6 +50,7 @@ class BatchOptions:
     extensions: tuple[str, ...] = DEFAULT_VIDEO_EXTENSIONS
     ffmpeg_command: str = "ffmpeg"
     overwrite: bool = False
+    keep_stage_cache: bool = False
 
 
 def discover_videos(root: Path, extensions: tuple[str, ...]) -> list[Path]:
@@ -133,8 +134,23 @@ def _prepare_video(
     ffmpeg_command: str,
 ) -> tuple[Path, float, float]:
     """Create a bounded constant-FPS processing copy and return its FPS metadata."""
+    directory.mkdir(parents=True, exist_ok=True)
     source_fps, _, _ = _probe_video(source)
     processed = directory / f"{source.stem}.normalized.mp4"
+    marker = directory / "normalized.json"
+    expected = {
+        "source": video_identity(source),
+        "target_fps": target_fps,
+        "max_seconds": max_seconds,
+    }
+    if processed.is_file() and marker.is_file():
+        try:
+            state = json.loads(marker.read_text(encoding="utf-8"))
+            processed_fps, _, _ = _probe_video(processed)
+            if state == expected and abs(processed_fps - target_fps) < 1e-3:
+                return processed, source_fps, max_seconds
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
     executable = shutil.which(ffmpeg_command)
     if executable is None:
         raise RuntimeError(f"ffmpeg executable not found: {ffmpeg_command}")
@@ -163,6 +179,7 @@ def _prepare_video(
     ]
     subprocess.run(command, check=True)
     _probe_video(processed)
+    _atomic_checkpoint(marker, expected)
     return processed, source_fps, max_seconds
 
 
@@ -177,7 +194,14 @@ def _atomic_checkpoint(path: Path, state: dict[str, Any]) -> None:
 
 def _run_key(videos: list[Path], options: BatchOptions) -> str:
     stable = {
-        "videos": [path.relative_to(options.input_root).as_posix() for path in videos],
+        "videos": [
+            {
+                "relative_path": path.relative_to(options.input_root).as_posix(),
+                "size": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            }
+            for path in videos
+        ],
         "gpu_ids": options.gpu_ids,
         "workers_per_gpu": options.workers_per_gpu,
         "target_fps": options.target_fps,
@@ -230,6 +254,10 @@ def _worker_main(
     _atomic_checkpoint(checkpoint_path, state)
     for video in tasks:
         relative = video.relative_to(options.input_root).as_posix()
+        job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
+        job_root = checkpoint_path.parent / "stage_cache" / (
+            f"worker_{worker_id:03d}_{job_key}"
+        )
         if not options.overwrite and valid_existing_output(
             video, options.target_fps, options.max_video_seconds
         ):
@@ -238,45 +266,64 @@ def _worker_main(
                 "output": str(camera_json_path(video)),
             }
             _atomic_checkpoint(checkpoint_path, state)
+            if not options.keep_stage_cache:
+                shutil.rmtree(job_root, ignore_errors=True)
             progress_queue.put(("skipped", worker_id, relative, ""))
             continue
-        state["tasks"][relative] = {"status": "running"}
+        if options.overwrite and job_root.is_dir():
+            shutil.rmtree(job_root)
+        state["tasks"][relative] = {
+            "status": "running",
+            "stage_cache": str(job_root),
+        }
         _atomic_checkpoint(checkpoint_path, state)
         try:
-            with tempfile.TemporaryDirectory(
-                prefix=f"camera-create-w{worker_id:03d}-"
-            ) as temporary:
-                job_root = Path(temporary)
-                normalized, source_fps, applied_seconds = _prepare_video(
-                    video,
-                    job_root,
-                    options.target_fps,
-                    options.max_video_seconds,
-                    options.ffmpeg_command,
-                )
-                result_dir = job_root / "result"
-                CameraCreatePipeline(options.model_paths, pipeline_options).run(
-                    normalized, result_dir
-                )
-                payload = export_camera_json_v2(
-                    result_dir,
-                    camera_json_path(video),
-                    video.name,
-                    source_fps,
-                    options.target_fps,
-                    applied_seconds,
-                )
+            normalized, source_fps, applied_seconds = _prepare_video(
+                video,
+                job_root,
+                options.target_fps,
+                options.max_video_seconds,
+                options.ffmpeg_command,
+            )
+            result_dir = job_root / "result"
+            CameraCreatePipeline(options.model_paths, pipeline_options).run(
+                normalized, result_dir, job_root / "pipeline"
+            )
+            payload = export_camera_json_v2(
+                result_dir,
+                camera_json_path(video),
+                video.name,
+                source_fps,
+                options.target_fps,
+                applied_seconds,
+            )
             state["tasks"][relative] = {
                 "status": "completed",
                 "output": str(camera_json_path(video)),
                 "frame_count": payload["frame_count"],
             }
+            if not options.keep_stage_cache:
+                shutil.rmtree(job_root, ignore_errors=True)
             event = ("completed", worker_id, relative, "")
         except Exception as error:  # noqa: BLE001 - isolate failure to one video
             detail = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
             )
-            state["tasks"][relative] = {"status": "failed", "error": detail}
+            stage_state_path = job_root / "pipeline" / "stage_state.json"
+            completed_stages: list[str] = []
+            if stage_state_path.is_file():
+                try:
+                    completed_stages = json.loads(
+                        stage_state_path.read_text(encoding="utf-8")
+                    ).get("completed_stages", [])
+                except (OSError, json.JSONDecodeError):
+                    pass
+            state["tasks"][relative] = {
+                "status": "failed",
+                "error": detail,
+                "stage_cache": str(job_root),
+                "completed_stages": completed_stages,
+            }
             event = ("failed", worker_id, relative, str(error))
         _atomic_checkpoint(checkpoint_path, state)
         progress_queue.put(event)
@@ -312,6 +359,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "already_complete": already_complete,
         "checkpoint_root": str(run_root),
         "overwrite": options.overwrite,
+        "keep_stage_cache": options.keep_stage_cache,
         "video_extensions": list(options.extensions),
         "ffmpeg_command": options.ffmpeg_command,
         "pi3x_chunk": options.pipeline_options.pi3x_chunk,

@@ -117,6 +117,39 @@ def default_fov_x(width: int, focal_guess_px: float | None = None) -> float:
 def save_depth_cache(
     path: Path, depths: np.ndarray, scale: np.ndarray, raw_scale: np.ndarray
 ) -> None:
-    """Write the cache contract consumed by the patched VIPE CachedDepthModel."""
+    """Atomically write the cache contract consumed by VIPE CachedDepthModel."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, depths=depths, scale_history=scale, raw_scale=raw_scale)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as stream:
+        np.savez_compressed(
+            stream, depths=depths, scale_history=scale, raw_scale=raw_scale
+        )
+    temporary.replace(path)
+
+
+def load_depth_cache(
+    path: Path, expected_frames: int, expected_shape: tuple[int, int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load and validate a completed fused metric-depth resume checkpoint."""
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    with np.load(path, allow_pickle=False) as data:
+        required = {"depths", "scale_history", "raw_scale"}
+        missing = required.difference(data.files)
+        if missing:
+            raise ValueError(f"Metric-depth cache missing fields: {sorted(missing)}")
+        depths = np.asarray(data["depths"], dtype=np.float32)
+        scale = np.asarray(data["scale_history"], dtype=np.float32)
+        raw_scale = np.asarray(data["raw_scale"], dtype=np.float32)
+    expected_depth_shape = (expected_frames, *expected_shape)
+    if depths.shape != expected_depth_shape:
+        raise ValueError(
+            f"Metric-depth cache shape {depths.shape} != {expected_depth_shape}"
+        )
+    if scale.shape != (expected_frames,) or raw_scale.shape != (expected_frames,):
+        raise ValueError("Metric-depth cache scale arrays have invalid shapes")
+    if not np.all(np.isfinite(depths) & (depths > 0)):
+        raise ValueError("Metric-depth cache contains invalid depth")
+    if not np.all(np.isfinite(scale) & (scale > 0)):
+        raise ValueError("Metric-depth cache contains invalid scale")
+    return depths, scale, raw_scale

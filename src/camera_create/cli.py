@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 from pathlib import Path
 
 from .batch import DEFAULT_VIDEO_EXTENSIONS, BatchOptions, run_batch
@@ -39,7 +40,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fov-x-deg", type=float, help="Optional known horizontal field of view"
     )
-    parser.add_argument("--work-dir", type=Path, help="Explicit scratch directory")
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="Legacy explicit scratch/resume directory for a single video",
+    )
+    parser.add_argument(
+        "--stage-cache-dir",
+        type=Path,
+        help="Single-video stage resume directory; default: OUTPUT/.camera_create_ckpt",
+    )
+    parser.add_argument(
+        "--keep-stage-cache",
+        action="store_true",
+        help="Keep successful stage caches; failed runs always keep them for resume",
+    )
     parser.add_argument(
         "--keep-work",
         action="store_true",
@@ -151,8 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     if input_path.is_dir():
         if args.output is not None:
             raise ValueError("--output must be omitted in directory batch mode")
-        if args.work_dir is not None or args.keep_work:
-            raise ValueError("--work-dir/--keep-work are only supported for one video")
+        if args.work_dir is not None or args.stage_cache_dir is not None or args.keep_work:
+            raise ValueError(
+                "--work-dir/--stage-cache-dir/--keep-work are single-video options"
+            )
         extensions = tuple(
             item.strip().lower()
             for item in args.video_extensions.split(",")
@@ -176,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                 extensions=extensions,
                 ffmpeg_command=args.ffmpeg_command,
                 overwrite=args.overwrite,
+                keep_stage_cache=args.keep_stage_cache,
             )
         )
         print(json.dumps(report, indent=2, ensure_ascii=False))
@@ -184,8 +202,17 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"Input does not exist: {input_path}")
     if args.output is None:
         raise ValueError("--output is required when --input is one video file")
+    if args.work_dir is not None and args.stage_cache_dir is not None:
+        raise ValueError("--work-dir and --stage-cache-dir are mutually exclusive")
+    output_dir = args.output.resolve()
+    explicit_cache = args.work_dir is not None or args.stage_cache_dir is not None
+    stage_cache = (
+        args.work_dir or args.stage_cache_dir or output_dir / ".camera_create_ckpt"
+    ).resolve()
     report = CameraCreatePipeline(models, options).run(
-        input_path, args.output, args.work_dir
+        input_path, output_dir, stage_cache
     )
+    if not explicit_cache and not args.keep_stage_cache:
+        shutil.rmtree(stage_cache, ignore_errors=True)
     print(json.dumps(report, indent=2))
     return 0

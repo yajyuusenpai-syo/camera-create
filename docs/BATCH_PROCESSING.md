@@ -61,12 +61,33 @@ checkpoint 默认保存在：
 ├── worker_000.json
 ├── worker_001.json
 ├── ...
+├── stage_cache/
+│   └── worker_<编号>_<视频哈希>/
+│       ├── *.normalized.mp4 / normalized.json
+│       └── pipeline/
+│           ├── pi3x_depth.npz
+│           ├── moge3_depth.npz
+│           ├── metric_depth_cache.npz
+│           ├── stage_state.json
+│           └── vipe/
 └── summary.json
 ```
 
 每个 worker 在任务开始、成功或失败后原子更新自己的 JSON。重新执行相同命令时，
 完整且满足当前 FPS/时长配置的 `cam_<原文件名>.json` 会跳过；失败或不完整的结果
-会重新运行。改变任务列表或关键推理参数会创建新的 run 哈希目录。强制重算使用：
+会从最后一个有效阶段继续：Pi3X、MoGe-3 和融合 metric depth 均不会重复推理，
+VIPE 失败时只重跑 VIPE。worker JSON 的失败条目会记录 `stage_cache` 路径与
+`completed_stages`；NPZ 和 JSON 均采用临时文件加原子改名，半写文件不会被复用。
+
+输入文件大小/修改时间、任务列表或关键推理参数发生变化时会创建新 run 哈希，
+pipeline 内部还有独立配置指纹，避免错误复用旧深度。成功发布最终 JSON 后默认删除
+该视频的大型阶段缓存；失败缓存会保留。调试或希望成功后也保留时传：
+
+```bash
+bash scripts/run_batch.sh /data/videos --gpu-ids 0,1 --keep-stage-cache
+```
+
+强制重算最终结果使用：
 
 ```bash
 bash scripts/run_batch.sh /data/videos --gpu-ids 0,1 --overwrite
@@ -101,8 +122,11 @@ OpenCV 坐标系下的逐帧 `c2w` 与像素单位 3x3 `intrinsics`。时间戳�
 --workers-per-gpu 1
 --checkpoint-dir PATH
 --overwrite
+--keep-stage-cache
 --ffmpeg-command /path/to/ffmpeg
 ```
 
-目录模式不能传 `--output`、`--work-dir` 或 `--keep-work`。单视频模式保持原调用
-方式不变，仍要求 `--output`。
+目录模式不能传 `--output`、`--work-dir`、`--stage-cache-dir` 或 `--keep-work`。
+单视频模式仍要求 `--output`，并默认将失败恢复点放在
+`OUTPUT/.camera_create_ckpt`；成功后自动清理。可用 `--stage-cache-dir PATH` 指定位置，
+或用 `--keep-stage-cache` 在成功后保留。

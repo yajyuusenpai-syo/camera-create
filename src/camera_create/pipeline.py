@@ -10,11 +10,18 @@ from pathlib import Path
 
 from .artifacts import export_camera_artifacts
 from .config import ModelPaths
-from .depth import default_fov_x, fuse_metric_depths, save_depth_cache
+from .depth import (
+    default_fov_x,
+    fuse_metric_depths,
+    load_depth_cache,
+    save_depth_cache,
+)
+from .stage_cache import StageCache, fingerprint, video_identity
 from .vipe_runner import preflight_vipe_assets, run_vipe
 from .worker_runner import (
     default_environment_executable,
     ensure_matching_workers,
+    load_worker_cache,
     run_moge3_worker,
     run_pi3x_worker,
 )
@@ -71,51 +78,106 @@ class CameraCreatePipeline:
             else Path(tempfile.mkdtemp(prefix="camera-create-"))
         )
         actual_work.mkdir(parents=True, exist_ok=True)
+        cache_context = {
+            "video": video_identity(video),
+            "pi3x_checkpoint": str(self.models.pi3x.resolve()),
+            "moge3_checkpoint": str(self.models.moge3.resolve()),
+            "pi3x_chunk": self.options.pi3x_chunk,
+            "pi3x_stride": self.options.pi3x_stride,
+            "ema_momentum": self.options.ema_momentum,
+            "max_inference_side": self.options.max_inference_side,
+            "fov_x_deg": self.options.fov_x_deg,
+            "moge3_refine_steps": self.options.moge3_refine_steps,
+            "moge3_fp16": self.options.moge3_fp16,
+            "pi3x_python": str(self.options.pi3x_python),
+            "moge3_python": str(self.options.moge3_python),
+        }
+        stage_cache = StageCache(
+            actual_work, fingerprint(cache_context), cache_context
+        )
+        resumed = stage_cache.prepare()
+        if resumed:
+            LOG.info("Found matching stage-resume cache: %s", actual_work)
         try:
             pi3x_cache = actual_work / "pi3x_depth.npz"
             moge3_cache = actual_work / "moge3_depth.npz"
-            LOG.info("Running isolated Pi3X worker: %s", self.options.pi3x_python)
-            pi3x_result = run_pi3x_worker(
-                self.options.pi3x_python,
-                video,
-                self.models.pi3x,
-                pi3x_cache,
-                self.options.device,
-                self.options.pi3x_chunk,
-                self.options.pi3x_stride,
-                self.options.max_inference_side,
-            )
+            try:
+                pi3x_result = load_worker_cache(pi3x_cache, "Pi3X")
+                LOG.info("[resume] Reusing Pi3X depth: %s", pi3x_cache)
+                stage_cache.completed("pi3x")
+            except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
+                pi3x_cache.unlink(missing_ok=True)
+                LOG.info("Running isolated Pi3X worker: %s", self.options.pi3x_python)
+                pi3x_result = run_pi3x_worker(
+                    self.options.pi3x_python,
+                    video,
+                    self.models.pi3x,
+                    pi3x_cache,
+                    self.options.device,
+                    self.options.pi3x_chunk,
+                    self.options.pi3x_stride,
+                    self.options.max_inference_side,
+                )
+                stage_cache.completed("pi3x")
             fov_x = self.options.fov_x_deg or default_fov_x(
                 pi3x_result.original_width
             )
-            LOG.info("Running isolated MoGe-3 worker: %s", self.options.moge3_python)
-            moge3_result = run_moge3_worker(
-                self.options.moge3_python,
-                video,
-                self.models.moge3,
-                moge3_cache,
-                self.options.device,
-                self.options.max_inference_side,
-                fov_x,
-                self.options.moge3_refine_steps,
-                self.options.moge3_fp16,
-            )
+            try:
+                moge3_result = load_worker_cache(moge3_cache, "MoGe-3")
+                LOG.info("[resume] Reusing MoGe-3 depth: %s", moge3_cache)
+                stage_cache.completed("moge3")
+            except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
+                moge3_cache.unlink(missing_ok=True)
+                LOG.info(
+                    "Running isolated MoGe-3 worker: %s", self.options.moge3_python
+                )
+                moge3_result = run_moge3_worker(
+                    self.options.moge3_python,
+                    video,
+                    self.models.moge3,
+                    moge3_cache,
+                    self.options.device,
+                    self.options.max_inference_side,
+                    fov_x,
+                    self.options.moge3_refine_steps,
+                    self.options.moge3_fp16,
+                )
+                stage_cache.completed("moge3")
             ensure_matching_workers(pi3x_result, moge3_result)
-            fused, scale, raw_scale = fuse_metric_depths(
-                pi3x_result.depth, moge3_result.depth, self.options.ema_momentum
-            )
             cache_path = actual_work / "metric_depth_cache.npz"
-            save_depth_cache(cache_path, fused, scale, raw_scale)
+            try:
+                _, scale, _ = load_depth_cache(
+                    cache_path,
+                    pi3x_result.frame_count,
+                    (pi3x_result.inference_height, pi3x_result.inference_width),
+                )
+                LOG.info("[resume] Reusing fused metric depth: %s", cache_path)
+                stage_cache.completed("metric_depth")
+            except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
+                cache_path.unlink(missing_ok=True)
+                fused, scale, raw_scale = fuse_metric_depths(
+                    pi3x_result.depth,
+                    moge3_result.depth,
+                    self.options.ema_momentum,
+                )
+                save_depth_cache(cache_path, fused, scale, raw_scale)
+                stage_cache.completed("metric_depth")
             vipe_dir = actual_work / "vipe"
-            LOG.info("Running VIPE metric bundle adjustment")
-            run_vipe(
-                video,
-                vipe_dir,
-                cache_path,
-                self.models.vipe,
-                self.options.vipe_command,
-                self.options.allow_vipe_downloads,
-            )
+            completed_stages = stage_cache.read().get("completed_stages", [])
+            if "vipe" in completed_stages and vipe_dir.is_dir():
+                LOG.info("[resume] Reusing completed VIPE output: %s", vipe_dir)
+            else:
+                if vipe_dir.is_dir():
+                    shutil.rmtree(vipe_dir)
+                LOG.info("Running VIPE metric bundle adjustment")
+                run_vipe(
+                    video,
+                    vipe_dir,
+                    cache_path,
+                    self.models.vipe,
+                    self.options.vipe_command,
+                    self.options.allow_vipe_downloads,
+                )
             metadata = {
                 "input_video": str(video),
                 "frame_count": pi3x_result.frame_count,
@@ -133,6 +195,7 @@ class CameraCreatePipeline:
             report = export_camera_artifacts(
                 video, vipe_dir, output_dir, pi3x_result.frame_count, scale, metadata
             )
+            stage_cache.completed("vipe")
             if self.options.keep_work:
                 retained = output_dir / "work"
                 if retained.exists():
