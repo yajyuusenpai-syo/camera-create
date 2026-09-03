@@ -122,7 +122,8 @@ MoGe-3 推荐 `Ruicheng/moge-3-vitl`，不默认采用 1.25B 的 ViT-G。ViT-L �
 ```
 
 该脚本会把 cached metric-depth backend 与 `vipe_cached_depth` 配置复制到
-VIPE checkout，然后使用当前 Python 环境进行 editable install。运行前检查：
+VIPE checkout，并为 v1.2.0 回填 cached backend 所需的原始帧索引，然后使用当前
+Python 环境进行 editable install。运行前检查：
 
 ```bash
 .envs/pi3x/bin/python scripts/check_three_envs.py --env-root .envs --project-root .
@@ -130,6 +131,14 @@ VIPE checkout，然后使用当前 Python 环境进行 editable install。运行
 
 完整检查也会验证上述两个 VIPE 资产；`--skip-checkpoints` 会同时跳过模型权重和
 VIPE 资产，只适合刚创建完环境时使用。
+
+如果旧安装报 `DepthEstimationInput has no attribute frame_idx`，拉取最新代码后只需
+重新应用源码补丁，不需要重新编译 CUDA 扩展：
+
+```bash
+.envs/vipe/bin/python scripts/setup_vipe.py \
+  --vipe-source third_party/vipe --skip-install
+```
 
 ## 4. 端到端调用
 

@@ -56,6 +56,42 @@ def patch_factory(factory_path: Path) -> None:
     )
 
 
+def patch_depth_frame_index(base_path: Path, buffer_path: Path) -> None:
+    """Backport the raw-frame index plumbing missing from VIPE v1.2.0."""
+    base_source = base_path.read_text(encoding="utf-8")
+    base_field = "    frame_idx: int | None = None\n"
+    if base_field not in base_source:
+        base_marker = "    camera_type: CameraType = CameraType.PINHOLE\n"
+        if base_marker not in base_source:
+            raise RuntimeError(
+                f"Cannot safely patch unfamiliar VIPE depth input: {base_path}"
+            )
+        base_path.write_text(
+            base_source.replace(base_marker, base_marker + base_field, 1),
+            encoding="utf-8",
+        )
+
+    buffer_source = buffer_path.read_text(encoding="utf-8")
+    buffer_field = "                frame_idx=int(self.tstamp[frame_idx].item()),\n"
+    if buffer_field not in buffer_source:
+        buffer_marker = (
+            "                camera_type=self.camera_type,\n"
+            "            )\n"
+        )
+        if buffer_marker not in buffer_source:
+            raise RuntimeError(
+                f"Cannot safely patch unfamiliar VIPE SLAM buffer: {buffer_path}"
+            )
+        replacement = (
+            "                camera_type=self.camera_type,\n"
+            + buffer_field
+            + "            )\n"
+        )
+        buffer_path.write_text(
+            buffer_source.replace(buffer_marker, replacement, 1), encoding="utf-8"
+        )
+
+
 def main() -> int:
     """Install VIPE into the active Python environment and apply local files."""
     parser = argparse.ArgumentParser()
@@ -85,6 +121,10 @@ def main() -> int:
         config_dir / "vipe_cached_depth.yaml",
     )
     patch_factory(depth_dir / "__init__.py")
+    patch_depth_frame_index(
+        depth_dir / "base.py",
+        vipe_source / "vipe" / "slam" / "components" / "buffer.py",
+    )
     if not args.skip_install:
         command = [
             sys.executable,
