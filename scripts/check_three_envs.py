@@ -7,7 +7,13 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from camera_create.vipe_assets import asset_paths
 
 
 def run_probe(python: Path, source: str) -> tuple[bool, str]:
@@ -71,6 +77,11 @@ def main() -> int:
         f"{vipe_cache}"
     )
     all_ok &= vipe_cache_ready
+    if not args.skip_checkpoints:
+        for name, asset in asset_paths(vipe_cache / "torch").items():
+            populated = asset.is_file() and asset.stat().st_size > 0
+            print(f"[{'OK' if populated else 'MISSING'}] VIPE asset {name}: {asset}")
+            all_ok &= populated
     print(json.dumps({"ready": all_ok, "env_root": str(env_root)}))
     return 0 if all_ok else 1
 

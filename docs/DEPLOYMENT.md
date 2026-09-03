@@ -60,8 +60,54 @@ camera_create/ckpt/vipe/   # VIPE/GeoCalib 的 Hugging Face 与 Torch 缓存
 ```
 
 模型具有各自许可证，尤其 Pi3X 权重可能限制商用。
-若用户没有预先设置 `HF_HOME`/`TORCH_HOME`，CLI 会让 VIPE 将自动下载的
-GeoCalib 等权重写入 `ckpt/vipe/`；已有环境变量始终优先，不会被覆盖。
+
+VIPE 不只有自身 Python 包。第一次创建 SLAM 网络时，上游还会尝试从 Google Drive
+下载 DROID-SLAM `droid.pth`；GeoCalib 则会从 GitHub Release 下载
+`pinhole.tar`。生产 CLI 默认禁止这种运行中下载，并在进入 VIPE 前检查：
+
+```text
+ckpt/vipe/torch/hub/droid_slam/droid.pth
+ckpt/vipe/torch/hub/geocalib/pinhole.tar
+```
+
+测试服务器能访问 Hugging Face 和 GitHub 时，一次性准备：
+
+```bash
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py \
+  --cache-root ckpt/vipe --download-missing
+```
+
+若只能访问国内 HF 反向代理，可覆盖 DROID URL（代理域名由部署方自行确认）：
+
+```bash
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py \
+  --cache-root ckpt/vipe --download-missing \
+  --droid-url https://hf-mirror.com/vslamlab/droidslam/resolve/main/droid.pth
+```
+
+这里的 DROID-SLAM 下载地址是社区 Hugging Face 镜像
+`vslamlab/droidslam`，不是 NVIDIA 官方模型仓库；GeoCalib 使用官方 v1.0 Release。
+如果不希望使用镜像，可在能访问 Google Drive 的电脑下载官方文件，然后执行：
+
+```bash
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py \
+  --cache-root ckpt/vipe \
+  --droid-source /downloads/droid.pth \
+  --geocalib-source /downloads/pinhole.tar
+```
+
+公司服务器离线时，直接从已经成功准备的同版本测试机复制整个目录即可：
+
+```bash
+scp -r test-server:/path/camera-create/ckpt/vipe/torch ./ckpt/vipe/
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py --cache-root ckpt/vipe
+```
+
+这两个文件是模型数据，不含 Python/CUDA 二进制，可以跨两台 Linux 服务器迁移；
+VIPE 源码仍须固定 v1.2.0，三套环境仍按各自服务器的 CUDA 方案安装。若 shell 已设置
+`TORCH_HOME`，CLI 会遵循该变量并在那里检查，部署时建议先 `unset TORCH_HOME`，使缓存
+稳定落在 `ckpt/vipe/torch`。只有确认运行机能访问 Google Drive/GitHub 时，才可显式
+传 `--allow-vipe-downloads` 恢复 VIPE 上游的自动下载行为。
 
 MoGe-3 推荐 `Ruicheng/moge-3-vitl`，不默认采用 1.25B 的 ViT-G。ViT-L 已明显改善
 局部几何且部署成本较低。默认 `refine_steps=3`；A100 论文数据约 121 ms/帧，
@@ -81,6 +127,9 @@ VIPE checkout，然后使用当前 Python 环境进行 editable install。运行
 ```bash
 .envs/pi3x/bin/python scripts/check_three_envs.py --env-root .envs --project-root .
 ```
+
+完整检查也会验证上述两个 VIPE 资产；`--skip-checkpoints` 会同时跳过模型权重和
+VIPE 资产，只适合刚创建完环境时使用。
 
 ## 4. 端到端调用
 

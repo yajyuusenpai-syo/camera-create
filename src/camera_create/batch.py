@@ -324,6 +324,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "pi3x_python": str(options.pipeline_options.pi3x_python),
         "moge3_python": str(options.pipeline_options.moge3_python),
         "vipe_command": options.pipeline_options.vipe_command,
+        "allow_vipe_downloads": options.pipeline_options.allow_vipe_downloads,
         "pi3x_checkpoint": str(options.model_paths.pi3x),
         "moge3_checkpoint": str(options.model_paths.moge3),
         "vipe_cache": str(options.model_paths.vipe),

@@ -11,7 +11,7 @@ from pathlib import Path
 from .artifacts import export_camera_artifacts
 from .config import ModelPaths
 from .depth import default_fov_x, fuse_metric_depths, save_depth_cache
-from .vipe_runner import run_vipe
+from .vipe_runner import preflight_vipe_assets, run_vipe
 from .worker_runner import (
     default_environment_executable,
     ensure_matching_workers,
@@ -44,6 +44,7 @@ class PipelineOptions:
     )
     moge3_refine_steps: int = 3
     moge3_fp16: bool = True
+    allow_vipe_downloads: bool = False
 
 
 class CameraCreatePipeline:
@@ -60,6 +61,9 @@ class CameraCreatePipeline:
         if not video.is_file():
             raise FileNotFoundError(f"Input video does not exist: {video}")
         self.models.validate_depth_models()
+        preflight_vipe_assets(
+            self.models.vipe, self.options.allow_vipe_downloads
+        )
         owned_work = work_dir is None
         actual_work = (
             work_dir.resolve()
@@ -105,7 +109,12 @@ class CameraCreatePipeline:
             vipe_dir = actual_work / "vipe"
             LOG.info("Running VIPE metric bundle adjustment")
             run_vipe(
-                video, vipe_dir, cache_path, self.models.vipe, self.options.vipe_command
+                video,
+                vipe_dir,
+                cache_path,
+                self.models.vipe,
+                self.options.vipe_command,
+                self.options.allow_vipe_downloads,
             )
             metadata = {
                 "input_video": str(video),

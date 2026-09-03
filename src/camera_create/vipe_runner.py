@@ -9,6 +9,8 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
+from .vipe_assets import require_assets
+
 
 @contextmanager
 def _temporary_environment(name: str, value: str) -> Iterator[None]:
@@ -48,12 +50,26 @@ def find_vipe(command: str = "vipe") -> str:
     return resolved
 
 
+def vipe_torch_home(model_cache: Path) -> Path:
+    """Resolve the Torch Hub cache exactly as the isolated VIPE process will."""
+    return Path(
+        os.environ.get("TORCH_HOME", str((model_cache / "torch").resolve()))
+    ).resolve()
+
+
+def preflight_vipe_assets(model_cache: Path, allow_downloads: bool = False) -> None:
+    """Check runtime weights before expensive Pi3X and MoGe-3 inference starts."""
+    if not allow_downloads:
+        require_assets(vipe_torch_home(model_cache))
+
+
 def run_vipe(
     video: Path,
     output_dir: Path,
     cache_path: Path,
     model_cache: Path,
     command: str = "vipe",
+    allow_downloads: bool = False,
 ) -> None:
     """Run VIPE cached-depth BA, inheriting metric scale from the depth cache."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -72,6 +88,7 @@ def run_vipe(
         "HF_HOME": str((model_cache / "huggingface").resolve()),
         "TORCH_HOME": str((model_cache / "torch").resolve()),
     }
+    preflight_vipe_assets(model_cache, allow_downloads)
     process_env = os.environ.copy()
     for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
         process_env.pop(name, None)

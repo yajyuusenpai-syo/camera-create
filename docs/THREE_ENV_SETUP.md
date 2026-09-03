@@ -258,6 +258,31 @@ camera-create/ckpt/
 └── vipe/   # VIPE、GeoCalib 和 Torch/Hugging Face cache
 ```
 
+VIPE v1.2.0 的运行期权重必须预先放到以下精确位置，否则上游会在推理过程中访问
+Google Drive/GitHub：
+
+```text
+ckpt/vipe/torch/hub/droid_slam/droid.pth
+ckpt/vipe/torch/hub/geocalib/pinhole.tar
+```
+
+联网准备与离线导入分别使用：
+
+```bash
+# 联网机器；DROID 使用社区 HF 镜像，GeoCalib 使用官方 GitHub Release
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py \
+  --cache-root ckpt/vipe --download-missing
+
+# 离线机器；从 U 盘/scp 得到两个文件后导入
+.envs/vipe/bin/python scripts/prepare_vipe_assets.py \
+  --cache-root ckpt/vipe \
+  --droid-source /mnt/models/droid.pth \
+  --geocalib-source /mnt/models/pinhole.tar
+```
+
+也可以直接迁移联网机器的整个 `ckpt/vipe/torch` 目录。权重与 Python 环境隔离，
+无需在公司服务器重新下载，但 VIPE v1.2.0 源码及 CUDA 扩展仍须按目标机器安装。
+
 权重不得提交到 Git。MoGe-3 不像旧版默认模型那样可省略权重参数，worker 必须显式
 指向 `ckpt/moge3` 中的 checkpoint。若模型页面需要接受许可，先在个人电脑完成授权，
 再下载并 `scp -r` 到服务器，服务器无需保存 Hugging Face token。
@@ -280,6 +305,7 @@ camera-create/ckpt/
 
 该脚本分别启动三个解释器，不会在同一进程导入三套 Torch/NumPy。三项均应显示
 `cuda: true`；Pi3X 应显示 NumPy 1.26.4，MoGe-3 应显示 NumPy 2.x。
+它还会检查 DROID-SLAM 与 GeoCalib 是否已在 `ckpt/vipe/torch/hub` 下就绪。
 
 ## 8. 激活和排错
 

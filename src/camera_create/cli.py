@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(default_environment_executable("vipe", "vipe")),
         help="VIPE executable from the isolated VIPE environment",
     )
+    parser.add_argument(
+        "--allow-vipe-downloads",
+        action="store_true",
+        help="Allow VIPE to download missing runtime assets during inference",
+    )
     parser.add_argument("--moge3-refine-steps", type=int, default=3)
     parser.add_argument(
         "--moge3-no-fp16", action="store_true", help="Disable MoGe-3 mixed precision"
@@ -140,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         vipe_command=args.vipe_command,
         moge3_refine_steps=args.moge3_refine_steps,
         moge3_fp16=not args.moge3_no_fp16,
+        allow_vipe_downloads=args.allow_vipe_downloads,
     )
     input_path = args.input.resolve()
     if input_path.is_dir():
