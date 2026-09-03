@@ -90,7 +90,8 @@ def main() -> int:
         if source is not None:
             _copy_atomically(source.resolve(), destination)
         elif args.download_missing and (
-            not destination.is_file() or destination.stat().st_size == 0
+            not destination.is_file()
+            or destination.stat().st_size < asset.minimum_bytes
         ):
             _download(urls[asset.name], destination)
 

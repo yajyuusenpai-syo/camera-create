@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from camera_create.vipe_assets import asset_paths, missing_assets, require_assets
+from camera_create.vipe_assets import (
+    VIPE_ASSETS,
+    asset_paths,
+    missing_assets,
+    require_assets,
+)
 
 
 def test_asset_paths_match_upstream_torch_hub_layout(tmp_path: Path) -> None:
@@ -19,8 +24,12 @@ def test_require_assets_reports_missing_files(tmp_path: Path) -> None:
 
 
 def test_nonempty_assets_are_ready(tmp_path: Path) -> None:
-    for path in asset_paths(tmp_path).values():
+    paths = asset_paths(tmp_path)
+    for asset in VIPE_ASSETS:
+        path = paths[asset.name]
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"checkpoint")
+        with path.open("wb") as output:
+            output.seek(asset.minimum_bytes - 1)
+            output.write(b"x")
     assert missing_assets(tmp_path) == {}
     require_assets(tmp_path)

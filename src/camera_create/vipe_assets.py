@@ -13,6 +13,7 @@ class VipeAsset:
     name: str
     relative_path: Path
     source_url: str
+    minimum_bytes: int
 
 
 VIPE_ASSETS = (
@@ -22,6 +23,7 @@ VIPE_ASSETS = (
         source_url=(
             "https://huggingface.co/vslamlab/droidslam/resolve/main/droid.pth"
         ),
+        minimum_bytes=15_000_000,
     ),
     VipeAsset(
         name="GeoCalib pinhole",
@@ -30,6 +32,7 @@ VIPE_ASSETS = (
             "https://github.com/cvg/GeoCalib/releases/download/v1.0/"
             "geocalib-pinhole.tar"
         ),
+        minimum_bytes=1_000_000,
     ),
 )
 
@@ -44,10 +47,12 @@ def asset_paths(torch_home: Path) -> dict[str, Path]:
 
 def missing_assets(torch_home: Path) -> dict[str, Path]:
     """Return missing or empty VIPE assets under a selected TORCH_HOME."""
+    paths = asset_paths(torch_home)
     return {
-        name: path
-        for name, path in asset_paths(torch_home).items()
-        if not path.is_file() or path.stat().st_size == 0
+        asset.name: paths[asset.name]
+        for asset in VIPE_ASSETS
+        if not paths[asset.name].is_file()
+        or paths[asset.name].stat().st_size < asset.minimum_bytes
     }
 
 
