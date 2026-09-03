@@ -159,6 +159,46 @@ ENV_ROOT=/data/camera-conda-envs bash scripts/setup_three_conda_envs.sh
 
 此时运行 CLI 必须显式传入三个绝对路径。
 
+### 公司服务器无法访问 PyTorch CUDA 索引
+
+若标准 `venv` 脚本报 `No matching distribution found for torch==2.5.1`，先确认平台：
+
+```bash
+python3.10 -c "import platform,sys; print(sys.version); print(platform.machine()); print(platform.platform())"
+curl -I https://download.pytorch.org/whl/cu124/
+```
+
+Pi3X 的官方 wheel 组合要求 CPython 3.10、Linux x86_64。若平台正确而 `curl` 失败，
+一般是公司网络无法访问 PyTorch CDN。不要反复创建 venv；在一台可联网、同为 Linux
+x86_64/Python 3.10 的机器准备离线 wheelhouse：
+
+```bash
+mkdir -p wheelhouse/pi3x
+python3.10 -m pip download --dest wheelhouse/pi3x \
+  torch==2.5.1 torchvision==0.20.1 \
+  --index-url https://download.pytorch.org/whl/cu124 \
+  --extra-index-url https://pypi.org/simple
+```
+
+将整个 `wheelhouse/pi3x` 上传到公司服务器后，可直接修复已有环境：
+
+```bash
+.envs/pi3x/bin/python -m pip install --no-index \
+  --find-links "$PWD/wheelhouse/pi3x" \
+  torch==2.5.1 torchvision==0.20.1
+```
+
+或让安装脚本自动使用离线目录：
+
+```bash
+PI3_WHEELHOUSE="$PWD/wheelhouse/pi3x" \
+bash scripts/setup_three_envs.sh
+```
+
+MoGe-3 和 VIPE 也支持 `MOGE_WHEELHOUSE`、`VIPE_WHEELHOUSE`。离线目录必须包含
+对应 Torch/TorchVision 及其全部依赖；因此应使用 `pip download`，不要只复制单个
+Torch wheel。公司有内部 PyPI 镜像时还可设置 `PYPI_INDEX_URL`。
+
 ## 6. 放置 checkpoint
 
 ```text
