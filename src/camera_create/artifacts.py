@@ -165,6 +165,7 @@ def export_camera_json_v2(
     video_name: str,
     source_fps: float,
     target_fps: float,
+    max_frames: int,
     max_video_seconds: float,
 ) -> dict:
     """Convert validated metric NPY artifacts into the per-frame JSON v2 contract."""
@@ -181,6 +182,10 @@ def export_camera_json_v2(
         raise ValueError(f"Unexpected intrinsics shape: {intrinsics.shape}")
     if target_fps <= 0:
         raise ValueError("target_fps must be positive")
+    if max_frames <= 0 or len(poses) > max_frames:
+        raise ValueError(
+            f"Camera frame count {len(poses)} exceeds max_frames={max_frames}"
+        )
     if report_path.is_file():
         validation = json.loads(report_path.read_text(encoding="utf-8"))
         if not validation.get("valid", False):
@@ -194,6 +199,7 @@ def export_camera_json_v2(
         "source_fps": float(source_fps),
         "target_fps": float(target_fps),
         "frame_count": len(poses),
+        "max_frames": int(max_frames),
         "is_metric": True,
         "max_video_seconds": float(max_video_seconds),
         "camera_convention": "OpenCV: +X right, +Y down, +Z forward",

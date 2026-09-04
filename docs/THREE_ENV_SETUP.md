@@ -399,7 +399,9 @@ source .envs/vipe/bin/activate
 ```bash
 .envs/pi3x/bin/python cli.py \
   --input /data/input.mp4 \
-  --output /data/camera-result \
+  --target-fps 24 \
+  --max-frames 241 \
+  --max-video-seconds 10.06 \
   --pi3x-python .envs/pi3x/bin/python \
   --moge3-python .envs/moge3/bin/python \
   --vipe-command .envs/vipe/bin/vipe

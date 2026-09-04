@@ -1,6 +1,15 @@
 # 输出格式
 
-每个输出目录包含：
+对于输入 `/data/videos/clip.mp4`，主结果与中间数组结构为：
+
+```text
+/data/videos/cam_clip.mp4.json
+/data/videos/clip.mp4.camera/
+```
+
+`cam_clip.mp4.json` 使用 format v2，包含源/目标 FPS、帧数、metric 标志，以及每帧
+的 `frame_index`、`timestamp_seconds`、4x4 `c2w` 和 3x3 `intrinsics`。
+`clip.mp4.camera/` 包含：
 
 | 文件 | 形状 | 含义 |
 |---|---:|---|

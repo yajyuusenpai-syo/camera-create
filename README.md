@@ -15,6 +15,10 @@ For exact source cloning and isolated environment commands, see
 scripts are provided; they create the same `.envs/<model>` runtime layout.
 Recursive multi-GPU directory scheduling, per-worker checkpoints, resume, tqdm,
 and `cam_<video name>.json` output are documented in `docs/BATCH_PROCESSING.md`.
+Each JSON is written beside its source; NPY/report artifacts live in the
+collision-safe `<full video filename>.camera/` sibling directory. Both single
+and directory modes honor `--target-fps`, `--max-frames`, and
+`--max-video-seconds`.
 
 Checkpoint layout:
 

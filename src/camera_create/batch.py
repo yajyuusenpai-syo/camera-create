@@ -46,6 +46,7 @@ class BatchOptions:
     gpu_ids: tuple[int, ...]
     workers_per_gpu: int = 1
     target_fps: float = 24.0
+    max_frames: int = 241
     max_video_seconds: float = 10.06
     extensions: tuple[str, ...] = DEFAULT_VIDEO_EXTENSIONS
     ffmpeg_command: str = "ffmpeg"
@@ -76,9 +77,15 @@ def camera_json_path(video: Path) -> Path:
     return video.parent / f"cam_{video.name}.json"
 
 
+def camera_artifact_dir(video: Path) -> Path:
+    """Place NPY/report artifacts beside the source without stem collisions."""
+    return video.parent / f"{video.name}.camera"
+
+
 def valid_existing_output(
     video: Path,
     target_fps: float | None = None,
+    max_frames: int | None = None,
     max_video_seconds: float | None = None,
 ) -> bool:
     """Recognize only complete metric format-v2 outputs as resumable successes."""
@@ -98,6 +105,9 @@ def valid_existing_output(
         )
         if target_fps is not None:
             valid &= abs(float(data.get("target_fps", -1)) - target_fps) < 1e-6
+        if max_frames is not None:
+            valid &= data.get("max_frames") == max_frames
+            valid &= 0 < int(data.get("frame_count", 0)) <= max_frames
         if max_video_seconds is not None:
             valid &= (
                 abs(float(data.get("max_video_seconds", -1)) - max_video_seconds) < 1e-6
@@ -126,10 +136,11 @@ def _probe_video(path: Path) -> tuple[float, int, float]:
     return fps, frames, frames / fps if frames > 0 else 0.0
 
 
-def _prepare_video(
+def prepare_video(
     source: Path,
     directory: Path,
     target_fps: float,
+    max_frames: int,
     max_seconds: float,
     ffmpeg_command: str,
 ) -> tuple[Path, float, float]:
@@ -141,6 +152,7 @@ def _prepare_video(
     expected = {
         "source": video_identity(source),
         "target_fps": target_fps,
+        "max_frames": max_frames,
         "max_seconds": max_seconds,
     }
     if processed.is_file() and marker.is_file():
@@ -175,6 +187,8 @@ def _prepare_video(
         "18",
         "-pix_fmt",
         "yuv420p",
+        "-frames:v",
+        str(max_frames),
         str(processed),
     ]
     subprocess.run(command, check=True)
@@ -205,6 +219,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         "gpu_ids": options.gpu_ids,
         "workers_per_gpu": options.workers_per_gpu,
         "target_fps": options.target_fps,
+        "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
         "pi3x_chunk": options.pipeline_options.pi3x_chunk,
         "pi3x_stride": options.pipeline_options.pi3x_stride,
@@ -259,7 +274,10 @@ def _worker_main(
             f"worker_{worker_id:03d}_{job_key}"
         )
         if not options.overwrite and valid_existing_output(
-            video, options.target_fps, options.max_video_seconds
+            video,
+            options.target_fps,
+            options.max_frames,
+            options.max_video_seconds,
         ):
             state["tasks"][relative] = {
                 "status": "completed",
@@ -278,14 +296,15 @@ def _worker_main(
         }
         _atomic_checkpoint(checkpoint_path, state)
         try:
-            normalized, source_fps, applied_seconds = _prepare_video(
+            normalized, source_fps, applied_seconds = prepare_video(
                 video,
                 job_root,
                 options.target_fps,
+                options.max_frames,
                 options.max_video_seconds,
                 options.ffmpeg_command,
             )
-            result_dir = job_root / "result"
+            result_dir = camera_artifact_dir(video)
             CameraCreatePipeline(options.model_paths, pipeline_options).run(
                 normalized, result_dir, job_root / "pipeline"
             )
@@ -295,6 +314,7 @@ def _worker_main(
                 video.name,
                 source_fps,
                 options.target_fps,
+                options.max_frames,
                 applied_seconds,
             )
             state["tasks"][relative] = {
@@ -336,8 +356,12 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("At least one GPU id is required")
     if options.workers_per_gpu < 1:
         raise ValueError("workers_per_gpu must be positive")
-    if options.target_fps <= 0 or options.max_video_seconds <= 0:
-        raise ValueError("target_fps and max_video_seconds must be positive")
+    if (
+        options.target_fps <= 0
+        or options.max_frames <= 0
+        or options.max_video_seconds <= 0
+    ):
+        raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
     options.model_paths.validate_depth_models()
     videos = discover_videos(options.input_root, options.extensions)
     worker_count = len(options.gpu_ids) * options.workers_per_gpu
@@ -345,7 +369,12 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     run_root = options.checkpoint_root / f"run_{_run_key(videos, options)}"
     run_root.mkdir(parents=True, exist_ok=True)
     already_complete = sum(
-        valid_existing_output(video, options.target_fps, options.max_video_seconds)
+        valid_existing_output(
+            video,
+            options.target_fps,
+            options.max_frames,
+            options.max_video_seconds,
+        )
         for video in videos
     )
     summary = {
@@ -355,6 +384,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "workers_per_gpu": options.workers_per_gpu,
         "total_workers": worker_count,
         "target_fps": options.target_fps,
+        "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
         "already_complete": already_complete,
         "checkpoint_root": str(run_root),

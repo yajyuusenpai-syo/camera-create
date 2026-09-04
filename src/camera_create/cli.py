@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import shutil
 from pathlib import Path
 
-from .batch import DEFAULT_VIDEO_EXTENSIONS, BatchOptions, run_batch
+from .artifacts import export_camera_json_v2
+from .batch import (
+    DEFAULT_VIDEO_EXTENSIONS,
+    BatchOptions,
+    camera_artifact_dir,
+    camera_json_path,
+    prepare_video,
+    run_batch,
+)
 from .config import ModelPaths
 from .pipeline import CameraCreatePipeline, PipelineOptions
 from .worker_runner import default_environment_executable
@@ -23,7 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--input", required=True, type=Path, help="Input video file or directory"
     )
     parser.add_argument(
-        "--output", type=Path, help="Single-video output directory; omit for batch mode"
+        "--output",
+        type=Path,
+        help="Deprecated; outputs are always written beside each source video",
     )
     parser.add_argument("--ckpt-root", type=Path, help="Default: camera_create/ckpt")
     parser.add_argument("--pi3x-ckpt", type=Path, help="Override Pi3X checkpoint path")
@@ -99,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Batch pipelines per GPU; increase only after measuring VRAM",
     )
     parser.add_argument("--target-fps", type=float, default=24.0)
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=241,
+        help="Maximum processed/output frames per video",
+    )
     parser.add_argument("--max-video-seconds", type=float, default=10.06)
     parser.add_argument(
         "--video-extensions",
@@ -189,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                 gpu_ids=_parse_gpu_ids(args.gpu_ids),
                 workers_per_gpu=args.workers_per_gpu,
                 target_fps=args.target_fps,
+                max_frames=args.max_frames,
                 max_video_seconds=args.max_video_seconds,
                 extensions=extensions,
                 ffmpeg_command=args.ffmpeg_command,
@@ -200,19 +218,56 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if report["failed"] or report["worker_crashes"] else 0
     if not input_path.is_file():
         raise FileNotFoundError(f"Input does not exist: {input_path}")
-    if args.output is None:
-        raise ValueError("--output is required when --input is one video file")
+    if args.target_fps <= 0 or args.max_frames <= 0 or args.max_video_seconds <= 0:
+        raise ValueError(
+            "--target-fps, --max-frames and --max-video-seconds must be positive"
+        )
+    if args.output is not None:
+        logging.getLogger(__name__).warning(
+            "--output is deprecated and ignored; outputs are written beside %s",
+            input_path,
+        )
     if args.work_dir is not None and args.stage_cache_dir is not None:
         raise ValueError("--work-dir and --stage-cache-dir are mutually exclusive")
-    output_dir = args.output.resolve()
+    output_dir = camera_artifact_dir(input_path)
     explicit_cache = args.work_dir is not None or args.stage_cache_dir is not None
+    single_key = hashlib.sha256(str(input_path).encode()).hexdigest()[:16]
     stage_cache = (
-        args.work_dir or args.stage_cache_dir or output_dir / ".camera_create_ckpt"
+        args.work_dir
+        or args.stage_cache_dir
+        or input_path.parent / ".camera_create_ckpt" / f"single_{single_key}"
     ).resolve()
+    normalized, source_fps, applied_seconds = prepare_video(
+        input_path,
+        stage_cache,
+        args.target_fps,
+        args.max_frames,
+        args.max_video_seconds,
+        args.ffmpeg_command,
+    )
     report = CameraCreatePipeline(models, options).run(
-        input_path, output_dir, stage_cache
+        normalized, output_dir, stage_cache / "pipeline"
+    )
+    payload = export_camera_json_v2(
+        output_dir,
+        camera_json_path(input_path),
+        input_path.name,
+        source_fps,
+        args.target_fps,
+        args.max_frames,
+        applied_seconds,
     )
     if not explicit_cache and not args.keep_stage_cache:
         shutil.rmtree(stage_cache, ignore_errors=True)
-    print(json.dumps(report, indent=2))
+    print(
+        json.dumps(
+            {
+                "camera_json": str(camera_json_path(input_path)),
+                "artifact_dir": str(output_dir),
+                "frame_count": payload["frame_count"],
+                "validation": report,
+            },
+            indent=2,
+        )
+    )
     return 0
