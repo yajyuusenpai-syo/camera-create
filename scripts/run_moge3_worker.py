@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 import numpy as np
 import torch
 
+from camera_create.runtime import configure_torch_backends
 from camera_create.video import read_video
 
 
@@ -35,7 +36,10 @@ def main() -> int:
     parser.add_argument("--fov-x-deg", type=float, default=60.0)
     parser.add_argument("--refine-steps", type=int, default=3)
     parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--disable-cudnn", action="store_true")
+    parser.add_argument("--disable-sdp", action="store_true")
     args = parser.parse_args()
+    configure_torch_backends(args.disable_cudnn, args.disable_sdp)
     video = read_video(args.input, args.max_inference_side)
     model = load_moge3(args.checkpoint, args.device)
     depths: list[np.ndarray] = []

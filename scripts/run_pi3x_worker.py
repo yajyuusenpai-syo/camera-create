@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 import numpy as np
 
 from camera_create.depth import infer_pi3x, load_pi3x
+from camera_create.runtime import configure_torch_backends
 from camera_create.video import read_video
 
 
@@ -26,7 +27,10 @@ def main() -> int:
     parser.add_argument("--chunk", type=int, default=16)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--max-inference-side", type=int, default=560)
+    parser.add_argument("--disable-cudnn", action="store_true")
+    parser.add_argument("--disable-sdp", action="store_true")
     args = parser.parse_args()
+    configure_torch_backends(args.disable_cudnn, args.disable_sdp)
     video = read_video(args.input, args.max_inference_side)
     model = load_pi3x(args.checkpoint, args.device)
     depth = infer_pi3x(model, video.frames_rgb, args.device, args.chunk, args.stride)

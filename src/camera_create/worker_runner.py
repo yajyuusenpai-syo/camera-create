@@ -124,18 +124,22 @@ def run_pi3x_worker(
     chunk: int,
     stride: int,
     max_side: int,
+    disable_cudnn: bool = False,
+    disable_sdp: bool = False,
 ) -> DepthWorkerResult:
     """Execute Pi3X using only its isolated interpreter."""
     executable = _require_executable(python, "Pi3X")
     script = PROJECT_ROOT / "scripts" / "run_pi3x_worker.py"
-    _run(
-        [
-            str(executable), str(script), "--input", str(video), "--output", str(output),
-            "--checkpoint", str(checkpoint), "--device", device, "--chunk", str(chunk),
-            "--stride", str(stride), "--max-inference-side", str(max_side),
-        ],
-        "Pi3X",
-    )
+    args = [
+        str(executable), str(script), "--input", str(video), "--output", str(output),
+        "--checkpoint", str(checkpoint), "--device", device, "--chunk", str(chunk),
+        "--stride", str(stride), "--max-inference-side", str(max_side),
+    ]
+    if disable_cudnn:
+        args.append("--disable-cudnn")
+    if disable_sdp:
+        args.append("--disable-sdp")
+    _run(args, "Pi3X")
     return load_worker_cache(output, "Pi3X")
 
 
@@ -149,6 +153,8 @@ def run_moge3_worker(
     fov_x_deg: float,
     refine_steps: int,
     use_fp16: bool,
+    disable_cudnn: bool = False,
+    disable_sdp: bool = False,
 ) -> DepthWorkerResult:
     """Execute MoGe-3 using only its isolated interpreter."""
     executable = _require_executable(python, "MoGe-3")
@@ -161,5 +167,9 @@ def run_moge3_worker(
     ]
     if use_fp16:
         args.append("--fp16")
+    if disable_cudnn:
+        args.append("--disable-cudnn")
+    if disable_sdp:
+        args.append("--disable-sdp")
     _run(args, "MoGe-3")
     return load_worker_cache(output, "MoGe-3")

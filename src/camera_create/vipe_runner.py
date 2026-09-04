@@ -11,6 +11,24 @@ from pathlib import Path
 
 from .vipe_assets import require_assets
 
+VIPE_BACKEND_BOOTSTRAP = """
+import os
+import torch
+if os.environ.get("CAMERA_CREATE_DISABLE_CUDNN") == "1":
+    torch.backends.cudnn.enabled = False
+if os.environ.get("CAMERA_CREATE_DISABLE_SDP") == "1":
+    cuda = torch.backends.cuda
+    for name in ("enable_flash_sdp", "enable_mem_efficient_sdp", "enable_cudnn_sdp"):
+        function = getattr(cuda, name, None)
+        if function is not None:
+            function(False)
+    enable_math = getattr(cuda, "enable_math_sdp", None)
+    if enable_math is not None:
+        enable_math(True)
+from vipe.cli.main import main
+main()
+"""
+
 
 @contextmanager
 def _temporary_environment(name: str, value: str) -> Iterator[None]:
@@ -105,12 +123,21 @@ def run_vipe(
     model_cache: Path,
     command: str = "vipe",
     allow_downloads: bool = False,
+    disable_cudnn: bool = False,
+    disable_sdp: bool = False,
 ) -> None:
     """Run VIPE cached-depth BA, inheriting metric scale from the depth cache."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    executable = find_vipe(command)
+    executable = Path(find_vipe(command)).resolve()
+    python = executable.parent / ("python.exe" if os.name == "nt" else "python")
+    if not python.is_file():
+        raise RuntimeError(
+            f"Cannot locate the VIPE environment Python beside {executable}: {python}"
+        )
     args = [
-        executable,
+        str(python),
+        "-c",
+        VIPE_BACKEND_BOOTSTRAP,
         "infer",
         str(video),
         "--output",
@@ -128,6 +155,10 @@ def run_vipe(
     for name in ("PYTHONPATH", "PYTHONHOME", "PIP_USER"):
         process_env.pop(name, None)
     process_env["PYTHONNOUSERSITE"] = "1"
+    if disable_cudnn:
+        process_env["CAMERA_CREATE_DISABLE_CUDNN"] = "1"
+    if disable_sdp:
+        process_env["CAMERA_CREATE_DISABLE_SDP"] = "1"
     with _model_cache_environment(cache_env), _temporary_environment(
         "SANA_WM_CACHED_DEPTH_PATH", str(cache_path.resolve())
     ):

@@ -74,7 +74,11 @@ def test_pi3x_worker_uses_selected_interpreter(
         8,
         4,
         448,
+        True,
+        True,
     )
     assert Path(invoked[0]) == executable.resolve()
     assert Path(invoked[1]).name == "run_pi3x_worker.py"
+    assert "--disable-cudnn" in invoked
+    assert "--disable-sdp" in invoked
     assert result.frame_count == 2

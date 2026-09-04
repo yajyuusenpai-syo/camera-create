@@ -56,6 +56,8 @@ class PipelineOptions:
     moge3_refine_steps: int = 3
     moge3_fp16: bool = True
     allow_vipe_downloads: bool = False
+    disable_cudnn: bool = False
+    disable_sdp: bool = False
 
 
 class CameraCreatePipeline:
@@ -94,6 +96,8 @@ class CameraCreatePipeline:
             "fov_x_deg": self.options.fov_x_deg,
             "moge3_refine_steps": self.options.moge3_refine_steps,
             "moge3_fp16": self.options.moge3_fp16,
+            "disable_cudnn": self.options.disable_cudnn,
+            "disable_sdp": self.options.disable_sdp,
             "pi3x_python": str(self.options.pi3x_python),
             "moge3_python": str(self.options.moge3_python),
         }
@@ -122,6 +126,8 @@ class CameraCreatePipeline:
                     self.options.pi3x_chunk,
                     self.options.pi3x_stride,
                     self.options.max_inference_side,
+                    self.options.disable_cudnn,
+                    self.options.disable_sdp,
                 )
                 stage_cache.completed("pi3x")
             fov_x = self.options.fov_x_deg or default_fov_x(
@@ -146,6 +152,8 @@ class CameraCreatePipeline:
                     fov_x,
                     self.options.moge3_refine_steps,
                     self.options.moge3_fp16,
+                    self.options.disable_cudnn,
+                    self.options.disable_sdp,
                 )
                 stage_cache.completed("moge3")
             ensure_matching_workers(pi3x_result, moge3_result)
@@ -182,6 +190,8 @@ class CameraCreatePipeline:
                     self.models.vipe,
                     self.options.vipe_command,
                     self.options.allow_vipe_downloads,
+                    self.options.disable_cudnn,
+                    self.options.disable_sdp,
                 )
             metadata = {
                 "input_video": str(video),
@@ -193,6 +203,8 @@ class CameraCreatePipeline:
                 "depth_inference_height": pi3x_result.inference_height,
                 "fov_x_deg_for_moge3": fov_x,
                 "moge3_refine_steps": self.options.moge3_refine_steps,
+                "disable_cudnn": self.options.disable_cudnn,
+                "disable_sdp": self.options.disable_sdp,
                 "translation_unit": "metre",
                 "pose_convention": "OpenCV c2w and w2c; +x right, +y down, +z forward",
                 "metric_basis": "MoGe-3 metric depth fused into Pi3X temporal depth and injected into VIPE BA",

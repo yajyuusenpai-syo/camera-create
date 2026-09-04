@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import multiprocessing as mp
@@ -19,6 +20,13 @@ from tqdm import tqdm
 
 from .artifacts import export_camera_json_v2
 from .config import ModelPaths
+from .distributed import (
+    DistributedLayout,
+    TaskLease,
+    assign_node_tasks,
+    ensure_shared_manifest,
+    validate_run_id,
+)
 from .pipeline import CameraCreatePipeline, PipelineOptions
 from .stage_cache import video_identity
 
@@ -45,6 +53,13 @@ class BatchOptions:
     pipeline_options: PipelineOptions
     gpu_ids: tuple[int, ...]
     workers_per_gpu: int = 1
+    node_rank: int = 0
+    num_nodes: int = 1
+    run_id: str | None = None
+    launcher_num_processes: int | None = None
+    main_process_ip: str | None = None
+    main_process_port: int | None = None
+    lease_timeout_seconds: float = 900.0
     target_fps: float = 24.0
     max_frames: int = 241
     max_video_seconds: float = 10.06
@@ -122,6 +137,49 @@ def assign_tasks(videos: list[Path], worker_count: int) -> list[list[Path]]:
     if worker_count < 1:
         raise ValueError("worker_count must be positive")
     return [videos[index::worker_count] for index in range(worker_count)]
+
+
+def _manifest_payload(
+    videos: list[Path], options: BatchOptions, layout: DistributedLayout
+) -> dict[str, Any]:
+    """Build the immutable task/config contract every distributed node must share."""
+    return {
+        "format_version": 1,
+        "videos": [
+            {
+                "relative_path": path.relative_to(options.input_root).as_posix(),
+                "size": path.stat().st_size,
+                "mtime_ns": path.stat().st_mtime_ns,
+            }
+            for path in videos
+        ],
+        "num_nodes": layout.num_nodes,
+        "local_worker_count": layout.local_worker_count,
+        "global_worker_count": layout.global_worker_count,
+        "launcher_num_processes": options.launcher_num_processes,
+        "main_process_ip": options.main_process_ip,
+        "main_process_port": options.main_process_port,
+        "gpu_ids": list(options.gpu_ids),
+        "workers_per_gpu": options.workers_per_gpu,
+        "target_fps": options.target_fps,
+        "max_frames": options.max_frames,
+        "max_video_seconds": options.max_video_seconds,
+        "extensions": list(options.extensions),
+        "pi3x_chunk": options.pipeline_options.pi3x_chunk,
+        "pi3x_stride": options.pipeline_options.pi3x_stride,
+        "max_inference_side": options.pipeline_options.max_inference_side,
+        "moge3_refine_steps": options.pipeline_options.moge3_refine_steps,
+        "moge3_fp16": options.pipeline_options.moge3_fp16,
+        "ema_momentum": options.pipeline_options.ema_momentum,
+        "fov_x_deg": options.pipeline_options.fov_x_deg,
+        "disable_cudnn": options.pipeline_options.disable_cudnn,
+        "disable_sdp": options.pipeline_options.disable_sdp,
+        "model_paths": {
+            "pi3x": str(options.model_paths.pi3x),
+            "moge3": str(options.model_paths.moge3),
+            "vipe": str(options.model_paths.vipe),
+        },
+    }
 
 
 def _probe_video(path: Path) -> tuple[float, int, float]:
@@ -206,6 +264,15 @@ def _atomic_checkpoint(path: Path, state: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _write_batch_summary(
+    run_root: Path, node_rank: int, num_nodes: int, result: dict[str, Any]
+) -> None:
+    """Write a collision-free node summary and preserve the single-node filename."""
+    _atomic_checkpoint(run_root / f"summary_node_{node_rank:03d}.json", result)
+    if num_nodes == 1:
+        _atomic_checkpoint(run_root / "summary.json", result)
+
+
 def _run_key(videos: list[Path], options: BatchOptions) -> str:
     stable = {
         "videos": [
@@ -218,6 +285,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         ],
         "gpu_ids": options.gpu_ids,
         "workers_per_gpu": options.workers_per_gpu,
+        "num_nodes": options.num_nodes,
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
@@ -228,6 +296,8 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         "moge3_fp16": options.pipeline_options.moge3_fp16,
         "ema_momentum": options.pipeline_options.ema_momentum,
         "fov_x_deg": options.pipeline_options.fov_x_deg,
+        "disable_cudnn": options.pipeline_options.disable_cudnn,
+        "disable_sdp": options.pipeline_options.disable_sdp,
         "model_paths": {
             "pi3x": str(options.model_paths.pi3x),
             "moge3": str(options.model_paths.moge3),
@@ -238,7 +308,8 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
 
 
 def _worker_main(
-    worker_id: int,
+    local_worker_id: int,
+    global_worker_id: int,
     gpu_id: int,
     tasks: list[Path],
     options: BatchOptions,
@@ -247,12 +318,31 @@ def _worker_main(
 ) -> None:
     """Run one fixed task partition on one visible GPU and checkpoint every result."""
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    worker_lease = TaskLease(
+        checkpoint_path.parent
+        / "worker_leases"
+        / f"worker_{global_worker_id:03d}.lease",
+        global_worker_id,
+        options.lease_timeout_seconds,
+    )
+    if not worker_lease.acquire():
+        for video in tasks:
+            relative = video.relative_to(options.input_root).as_posix()
+            progress_queue.put(
+                ("claimed_elsewhere", global_worker_id, relative, "")
+            )
+        progress_queue.put(("worker_finished", global_worker_id, "", ""))
+        return
     pipeline_options = replace(
         options.pipeline_options, device="cuda:0", keep_work=False
     )
     state: dict[str, Any] = {
         "format_version": 1,
-        "worker_id": worker_id,
+        "worker_id": global_worker_id,
+        "local_worker_id": local_worker_id,
+        "global_worker_id": global_worker_id,
+        "node_rank": options.node_rank,
+        "num_nodes": options.num_nodes,
         "gpu_id": gpu_id,
         "assigned_tasks": [
             path.relative_to(options.input_root).as_posix() for path in tasks
@@ -271,7 +361,7 @@ def _worker_main(
         relative = video.relative_to(options.input_root).as_posix()
         job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
         job_root = checkpoint_path.parent / "stage_cache" / (
-            f"worker_{worker_id:03d}_{job_key}"
+            f"worker_{global_worker_id:03d}_{job_key}"
         )
         if not options.overwrite and valid_existing_output(
             video,
@@ -286,7 +376,36 @@ def _worker_main(
             _atomic_checkpoint(checkpoint_path, state)
             if not options.keep_stage_cache:
                 shutil.rmtree(job_root, ignore_errors=True)
-            progress_queue.put(("skipped", worker_id, relative, ""))
+            progress_queue.put(("skipped", global_worker_id, relative, ""))
+            continue
+        lease = TaskLease(
+            checkpoint_path.parent / "leases" / f"{job_key}.lease",
+            global_worker_id,
+            options.lease_timeout_seconds,
+        )
+        if not lease.acquire():
+            state["tasks"][relative] = {
+                "status": "claimed_elsewhere",
+                "lease": str(lease.path),
+            }
+            _atomic_checkpoint(checkpoint_path, state)
+            progress_queue.put(
+                ("claimed_elsewhere", global_worker_id, relative, "")
+            )
+            continue
+        if not options.overwrite and valid_existing_output(
+            video,
+            options.target_fps,
+            options.max_frames,
+            options.max_video_seconds,
+        ):
+            state["tasks"][relative] = {
+                "status": "completed",
+                "output": str(camera_json_path(video)),
+            }
+            _atomic_checkpoint(checkpoint_path, state)
+            lease.release()
+            progress_queue.put(("skipped", global_worker_id, relative, ""))
             continue
         if options.overwrite and job_root.is_dir():
             shutil.rmtree(job_root)
@@ -324,7 +443,7 @@ def _worker_main(
             }
             if not options.keep_stage_cache:
                 shutil.rmtree(job_root, ignore_errors=True)
-            event = ("completed", worker_id, relative, "")
+            event = ("completed", global_worker_id, relative, "")
         except Exception as error:  # noqa: BLE001 - isolate failure to one video
             detail = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
@@ -344,10 +463,13 @@ def _worker_main(
                 "stage_cache": str(job_root),
                 "completed_stages": completed_stages,
             }
-            event = ("failed", worker_id, relative, str(error))
+            event = ("failed", global_worker_id, relative, str(error))
+        finally:
+            lease.release()
         _atomic_checkpoint(checkpoint_path, state)
         progress_queue.put(event)
-    progress_queue.put(("worker_finished", worker_id, "", ""))
+    worker_lease.release()
+    progress_queue.put(("worker_finished", global_worker_id, "", ""))
 
 
 def run_batch(options: BatchOptions) -> dict[str, Any]:
@@ -356,6 +478,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("At least one GPU id is required")
     if options.workers_per_gpu < 1:
         raise ValueError("workers_per_gpu must be positive")
+    if options.lease_timeout_seconds <= 0:
+        raise ValueError("lease_timeout_seconds must be positive")
     if (
         options.target_fps <= 0
         or options.max_frames <= 0
@@ -364,10 +488,47 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
     options.model_paths.validate_depth_models()
     videos = discover_videos(options.input_root, options.extensions)
-    worker_count = len(options.gpu_ids) * options.workers_per_gpu
-    assignments = assign_tasks(videos, worker_count)
-    run_root = options.checkpoint_root / f"run_{_run_key(videos, options)}"
-    run_root.mkdir(parents=True, exist_ok=True)
+    local_worker_count = len(options.gpu_ids) * options.workers_per_gpu
+    expected_launcher_processes = options.num_nodes * len(options.gpu_ids)
+    if (
+        options.launcher_num_processes is not None
+        and options.launcher_num_processes != expected_launcher_processes
+    ):
+        raise ValueError(
+            "--num-processes describes DLC GPU slots and must equal "
+            f"num_nodes × GPUs_per_node = {expected_launcher_processes}; got "
+            f"{options.launcher_num_processes}. --workers-per-gpu is applied separately."
+        )
+    layout = DistributedLayout(
+        node_rank=options.node_rank,
+        num_nodes=options.num_nodes,
+        local_worker_count=local_worker_count,
+    )
+    layout.validate()
+    if options.num_nodes > 1 and options.run_id is None:
+        raise ValueError("--run-id is required when --num-nodes is greater than 1")
+    run_token = (
+        validate_run_id(options.run_id)
+        if options.run_id is not None
+        else _run_key(videos, options)
+    )
+    run_root = options.checkpoint_root / f"run_{run_token}"
+    manifest_sha256 = ensure_shared_manifest(
+        run_root, _manifest_payload(videos, options, layout)
+    )
+    node_lease = TaskLease(
+        run_root / "node_leases" / f"node_{options.node_rank:03d}.lease",
+        options.node_rank,
+        options.lease_timeout_seconds,
+    )
+    if not node_lease.acquire():
+        raise RuntimeError(
+            f"Node rank {options.node_rank} is already active for run {run_token}. "
+            "Every live machine must use a unique --node-rank."
+        )
+    atexit.register(node_lease.release)
+    assignments = assign_node_tasks(videos, layout)
+    videos_assigned = sum(len(tasks) for tasks in assignments)
     already_complete = sum(
         valid_existing_output(
             video,
@@ -382,7 +543,18 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "videos_found": len(videos),
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
-        "total_workers": worker_count,
+        "node_rank": options.node_rank,
+        "num_nodes": options.num_nodes,
+        "local_workers": local_worker_count,
+        "global_workers": layout.global_worker_count,
+        "total_workers": layout.global_worker_count,
+        "videos_assigned": videos_assigned,
+        "run_id": run_token,
+        "manifest_sha256": manifest_sha256,
+        "launcher_num_processes": options.launcher_num_processes,
+        "main_process_ip": options.main_process_ip,
+        "main_process_port": options.main_process_port,
+        "lease_timeout_seconds": options.lease_timeout_seconds,
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
@@ -403,6 +575,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "moge3_python": str(options.pipeline_options.moge3_python),
         "vipe_command": options.pipeline_options.vipe_command,
         "allow_vipe_downloads": options.pipeline_options.allow_vipe_downloads,
+        "disable_cudnn": options.pipeline_options.disable_cudnn,
+        "disable_sdp": options.pipeline_options.disable_sdp,
         "pi3x_checkpoint": str(options.model_paths.pi3x),
         "moge3_checkpoint": str(options.model_paths.moge3),
         "vipe_cache": str(options.model_paths.vipe),
@@ -413,45 +587,50 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             **summary,
             "completed": 0,
             "skipped": 0,
+            "claimed_elsewhere": 0,
             "failed": 0,
             "worker_crashes": 0,
         }
-        (run_root / "summary.json").write_text(
-            json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
+        node_lease.release()
+        atexit.unregister(node_lease.release)
         return result
 
     context = mp.get_context("spawn")
     progress_queue = context.Queue()
     processes: list[mp.Process] = []
-    for worker_id, tasks in enumerate(assignments):
-        gpu_id = options.gpu_ids[worker_id // options.workers_per_gpu]
-        checkpoint = run_root / f"worker_{worker_id:03d}.json"
-        if not checkpoint.exists():
-            _atomic_checkpoint(
-                checkpoint,
-                {
-                    "format_version": 1,
-                    "worker_id": worker_id,
-                    "gpu_id": gpu_id,
-                    "assigned_tasks": [
-                        path.relative_to(options.input_root).as_posix()
-                        for path in tasks
-                    ],
-                    "tasks": {},
-                },
-            )
+    for local_worker_id, tasks in enumerate(assignments):
+        global_worker_id = layout.global_worker_id(local_worker_id)
+        gpu_id = options.gpu_ids[local_worker_id // options.workers_per_gpu]
+        checkpoint = run_root / f"worker_{global_worker_id:03d}.json"
         process = context.Process(
             target=_worker_main,
-            args=(worker_id, gpu_id, tasks, options, checkpoint, progress_queue),
-            name=f"camera-worker-{worker_id:03d}-gpu-{gpu_id}",
+            args=(
+                local_worker_id,
+                global_worker_id,
+                gpu_id,
+                tasks,
+                options,
+                checkpoint,
+                progress_queue,
+            ),
+            name=f"camera-worker-{global_worker_id:03d}-gpu-{gpu_id}",
         )
         process.start()
         processes.append(process)
 
-    counts = {"completed": 0, "skipped": 0, "failed": 0}
+    counts = {
+        "completed": 0,
+        "skipped": 0,
+        "claimed_elsewhere": 0,
+        "failed": 0,
+    }
     finished_workers = 0
-    with tqdm(total=len(videos), desc="metric camera videos", unit="video") as progress:
+    with tqdm(
+        total=videos_assigned,
+        desc=f"metric camera node {options.node_rank}/{options.num_nodes}",
+        unit="video",
+    ) as progress:
         while finished_workers < len(processes):
             try:
                 status, worker_id, relative, detail = progress_queue.get(timeout=0.5)
@@ -474,7 +653,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         if process.exitcode != 0:
             crashed += 1
     result = {**summary, **counts, "worker_crashes": crashed}
-    (run_root / "summary.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
+    node_lease.release()
+    atexit.unregister(node_lease.release)
     return result

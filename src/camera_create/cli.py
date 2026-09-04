@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -23,8 +24,59 @@ from .pipeline import CameraCreatePipeline, PipelineOptions
 from .worker_runner import default_environment_executable
 
 
+def _environment_int(name: str, default: int | None) -> int | None:
+    """Read one optional integer launcher variable with an actionable error."""
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError(f"Environment variable {name} must be an integer: {value}") from error
+
+
+def _environment_run_id() -> str | None:
+    """Resolve an explicit or DLC-provided stable distributed run identifier."""
+    for name in ("CAMERA_CREATE_RUN_ID", "DLC_JOB_ID", "PAI_JOB_ID"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _environment_bool(name: str) -> bool:
+    """Interpret a conventional boolean environment variable."""
+    value = os.environ.get(name, "").strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(f"Environment variable {name} must be a boolean: {value}")
+
+
+def _distributed_environment_defaults() -> tuple[int, int]:
+    """Resolve machine topology from DLC or an Accelerate/torchrun child process."""
+    group_world_size = _environment_int("GROUP_WORLD_SIZE", None)
+    group_rank = _environment_int("GROUP_RANK", None)
+    if group_world_size is not None and group_rank is not None:
+        return group_world_size, group_rank
+
+    world_size = _environment_int("WORLD_SIZE", 1)
+    rank = _environment_int("RANK", 0)
+    local_world_size = _environment_int("LOCAL_WORLD_SIZE", None)
+    if local_world_size is None or local_world_size <= 1:
+        return world_size or 1, rank or 0
+    if world_size is None or rank is None or world_size % local_world_size:
+        raise ValueError(
+            "WORLD_SIZE must be divisible by LOCAL_WORLD_SIZE for a multi-process "
+            "DLC/Accelerate launch"
+        )
+    return world_size // local_world_size, rank // local_world_size
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI arguments without importing heavyweight model dependencies."""
+    environment_num_nodes, environment_node_rank = _distributed_environment_defaults()
     parser = argparse.ArgumentParser(
         description="Estimate metric camera intrinsics/extrinsics from a video"
     )
@@ -99,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
+        "--disable-cudnn",
+        action="store_true",
+        default=_environment_bool("CAMERA_CREATE_DISABLE_CUDNN"),
+        help="Disable torch.backends.cudnn in Pi3X, MoGe-3 and VIPE",
+    )
+    parser.add_argument(
+        "--disable-sdp",
+        action="store_true",
+        default=_environment_bool("CAMERA_CREATE_DISABLE_SDP"),
+        help="Disable fused CUDA SDP backends globally while retaining math SDP",
+    )
+    parser.add_argument(
         "--gpu-ids",
         default="0",
         help="Batch mode physical GPU ids, comma separated; for example 0,1,2,3",
@@ -108,6 +172,57 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Batch pipelines per GPU; increase only after measuring VRAM",
+    )
+    parser.add_argument(
+        "--node-rank",
+        "--machine-rank",
+        "--machine_rank",
+        dest="node_rank",
+        type=int,
+        default=environment_node_rank,
+        help="Batch node index; inferred from DLC or Accelerate launcher variables",
+    )
+    parser.add_argument(
+        "--num-nodes",
+        "--num-machines",
+        "--num_machines",
+        dest="num_nodes",
+        type=int,
+        default=environment_num_nodes,
+        help="Total homogeneous machines; inferred from DLC or Accelerate variables",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=_environment_run_id(),
+        help="Shared immutable run namespace; required for multi-node batch mode",
+    )
+    parser.add_argument(
+        "--num-processes",
+        "--num_processes",
+        dest="launcher_num_processes",
+        type=int,
+        help="Optional DLC/Accelerate total GPU process count; validated as nodes × GPUs",
+    )
+    parser.add_argument(
+        "--main-process-ip",
+        "--main_process_ip",
+        dest="main_process_ip",
+        default=os.environ.get("MASTER_ADDR"),
+        help="DLC coordinator address; defaults to MASTER_ADDR and is recorded for audit",
+    )
+    parser.add_argument(
+        "--main-process-port",
+        "--main_process_port",
+        dest="main_process_port",
+        type=int,
+        default=_environment_int("MASTER_PORT", None),
+        help="DLC coordinator port; defaults to MASTER_PORT and is recorded for audit",
+    )
+    parser.add_argument(
+        "--lease-timeout-seconds",
+        type=float,
+        default=900.0,
+        help="Recover a per-video shared-filesystem lease after this heartbeat timeout",
     )
     parser.add_argument("--target-fps", type=float, default=24.0)
     parser.add_argument(
@@ -178,9 +293,26 @@ def main(argv: list[str] | None = None) -> int:
         moge3_refine_steps=args.moge3_refine_steps,
         moge3_fp16=not args.moge3_no_fp16,
         allow_vipe_downloads=args.allow_vipe_downloads,
+        disable_cudnn=args.disable_cudnn,
+        disable_sdp=args.disable_sdp,
     )
     input_path = args.input.resolve()
     if input_path.is_dir():
+        local_rank = _environment_int("LOCAL_RANK", None)
+        if local_rank not in (None, 0):
+            print(
+                json.dumps(
+                    {
+                        "status": "idle_launcher_process",
+                        "local_rank": local_rank,
+                        "reason": (
+                            "LOCAL_RANK=0 owns this machine's camera_create workers"
+                        ),
+                    },
+                    indent=2,
+                )
+            )
+            return 0
         if args.output is not None:
             raise ValueError("--output must be omitted in directory batch mode")
         if args.work_dir is not None or args.stage_cache_dir is not None or args.keep_work:
@@ -205,6 +337,13 @@ def main(argv: list[str] | None = None) -> int:
                 pipeline_options=options,
                 gpu_ids=_parse_gpu_ids(args.gpu_ids),
                 workers_per_gpu=args.workers_per_gpu,
+                node_rank=args.node_rank,
+                num_nodes=args.num_nodes,
+                run_id=args.run_id,
+                launcher_num_processes=args.launcher_num_processes,
+                main_process_ip=args.main_process_ip,
+                main_process_port=args.main_process_port,
+                lease_timeout_seconds=args.lease_timeout_seconds,
                 target_fps=args.target_fps,
                 max_frames=args.max_frames,
                 max_video_seconds=args.max_video_seconds,
