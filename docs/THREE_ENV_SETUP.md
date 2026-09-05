@@ -322,6 +322,18 @@ source .envs/vipe/bin/activate
 常见错误：
 
 - `No module named venv`：安装 `python3.10-venv`。
+- 重跑脚本时出现 `Building editable`、`Attempting uninstall`：这不是联网下载，而是
+  pip 重建源码链接。新版脚本会检查 PEP 610 的 `direct_url.json`；同一 Python 环境
+  已经指向同一源码目录时会输出 `[SKIP]`，Pi3、camera-create、utils3d-moge、
+  pipeline、FlexGEMM、MoGe 和 VIPE 均不会重复 editable 安装。修改 `pyproject.toml`、
+  C/CUDA 扩展源码或切换 Torch 后需要强制刷新：
+
+  ```bash
+  FORCE_EDITABLE_REINSTALL=1 bash scripts/setup_three_envs.sh
+  # 仅重编译 VIPE：
+  .envs/vipe/bin/python scripts/setup_vipe.py \
+    --vipe-source third_party/vipe --force-install
+  ```
 - VIPE 在 `Preparing editable metadata` 阶段访问 GitLab 并报
   `urllib.error.URLError`：VIPE v1.2.0 的 `setup.py` 会在 Eigen 头文件缺失时主动
   下载 Eigen 3.4。新版 `setup_vipe.py` 默认禁止这种隐式下载，并依次查找当前环境、

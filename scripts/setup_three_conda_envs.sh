@@ -21,6 +21,7 @@ VIPE_TORCHVISION_VERSION="${VIPE_TORCHVISION_VERSION:-0.24.0+cu128}"
 VIPE_CONDA_CUDA_TOOLKIT_VERSION="${VIPE_CONDA_CUDA_TOOLKIT_VERSION:-12.8}"
 INSTALL_VIPE_CONDA_CUDA_TOOLKIT="${INSTALL_VIPE_CONDA_CUDA_TOOLKIT:-1}"
 VIPE_CUDA_HOME="${VIPE_CUDA_HOME:-}"
+FORCE_EDITABLE_REINSTALL="${FORCE_EDITABLE_REINSTALL:-0}"
 
 if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" || ! -d "${SOURCE_ROOT}/utils3d-moge/.git" || ! -d "${SOURCE_ROOT}/pipeline/.git" || ! -d "${SOURCE_ROOT}/FlexGEMM/.git" ]]; then
   echo "Missing upstream source. Run scripts/clone_models.sh first." >&2
@@ -50,6 +51,18 @@ run_python() {
     "${CONDA_COMMAND}" run --no-capture-output --prefix "${path}" python "$@"
 }
 
+install_editable_once() {
+  local path="$1"
+  local source="$2"
+  shift 2
+  if [[ "${FORCE_EDITABLE_REINSTALL}" != "1" ]] && \
+    run_python "${path}" "${PROJECT_ROOT}/scripts/editable_install_status.py" "${source}"; then
+    echo "[SKIP] Editable source already installed: ${source}"
+    return 0
+  fi
+  run_python "${path}" -m pip install "$@" -e "${source}"
+}
+
 mkdir -p "${ENV_ROOT}"
 create_env "${ENV_ROOT}/pi3x"
 create_env "${ENV_ROOT}/moge3"
@@ -61,8 +74,8 @@ run_python "${ENV_ROOT}/pi3x" -m pip install \
   torch==2.5.1 torchvision==0.20.1 \
   --index-url "${PI3_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
 run_python "${ENV_ROOT}/pi3x" -m pip install -r "${SOURCE_ROOT}/Pi3/requirements.txt"
-run_python "${ENV_ROOT}/pi3x" -m pip install -e "${SOURCE_ROOT}/Pi3"
-run_python "${ENV_ROOT}/pi3x" -m pip install --no-deps -e "${PROJECT_ROOT}"
+install_editable_once "${ENV_ROOT}/pi3x" "${SOURCE_ROOT}/Pi3"
+install_editable_once "${ENV_ROOT}/pi3x" "${PROJECT_ROOT}" --no-deps
 run_python "${ENV_ROOT}/pi3x" -m pip install scipy tqdm
 
 echo "[2/4] Installing MoGe-3 Torch, dependencies, and source"
@@ -72,10 +85,10 @@ run_python "${ENV_ROOT}/moge3" -m pip install \
   --index-url "${MOGE_TORCH_INDEX_URL}" --extra-index-url https://pypi.org/simple
 run_python "${ENV_ROOT}/moge3" -m pip install \
   -r "${PROJECT_ROOT}/requirements/moge3-runtime.txt"
-run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/utils3d-moge"
-run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/pipeline"
-run_python "${ENV_ROOT}/moge3" -m pip install -e "${SOURCE_ROOT}/FlexGEMM"
-run_python "${ENV_ROOT}/moge3" -m pip install --no-deps -e "${SOURCE_ROOT}/MoGe"
+install_editable_once "${ENV_ROOT}/moge3" "${SOURCE_ROOT}/utils3d-moge"
+install_editable_once "${ENV_ROOT}/moge3" "${SOURCE_ROOT}/pipeline"
+install_editable_once "${ENV_ROOT}/moge3" "${SOURCE_ROOT}/FlexGEMM"
+install_editable_once "${ENV_ROOT}/moge3" "${SOURCE_ROOT}/MoGe" --no-deps
 
 echo "[3/4] Installing VIPE Torch and compiling VIPE CUDA extensions"
 # VIPE v1.2.0 officially locks Torch 2.9.0/cu128. Install a matching nvcc in the

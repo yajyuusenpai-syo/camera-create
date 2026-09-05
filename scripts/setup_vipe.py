@@ -10,6 +10,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from editable_install_status import is_editable_source_installed
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PROJECT_ROOT.parent
 
@@ -161,6 +167,11 @@ def main() -> int:
         action="store_true",
         help="Allow VIPE upstream setup.py to fetch Eigen 3.4 from GitLab.",
     )
+    parser.add_argument(
+        "--force-install",
+        action="store_true",
+        help="Rebuild the VIPE editable package and CUDA extension even if installed.",
+    )
     parser.add_argument("--skip-install", action="store_true")
     args = parser.parse_args()
     vipe_source = args.vipe_source.resolve()
@@ -179,24 +190,27 @@ def main() -> int:
         vipe_source / "vipe" / "slam" / "components" / "buffer.py",
     )
     if not args.skip_install:
-        prepare_eigen_headers(
-            vipe_source,
-            args.eigen_source,
-            allow_download=args.allow_eigen_download,
-        )
-        command = [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-build-isolation",
-        ]
-        if args.constraint:
-            command.extend(["--constraint", str(args.constraint.resolve())])
-        if args.no_deps:
-            command.append("--no-deps")
-        command.extend(["-e", str(vipe_source)])
-        subprocess.run(command, check=True, env=vipe_build_environment())
+        if is_editable_source_installed(vipe_source) and not args.force_install:
+            print(f"[SKIP] VIPE editable source already installed: {vipe_source}")
+        else:
+            prepare_eigen_headers(
+                vipe_source,
+                args.eigen_source,
+                allow_download=args.allow_eigen_download,
+            )
+            command = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-build-isolation",
+            ]
+            if args.constraint:
+                command.extend(["--constraint", str(args.constraint.resolve())])
+            if args.no_deps:
+                command.append("--no-deps")
+            command.extend(["-e", str(vipe_source)])
+            subprocess.run(command, check=True, env=vipe_build_environment())
     print(f"VIPE cached-depth integration ready at {vipe_source}")
     return 0
 

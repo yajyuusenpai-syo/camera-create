@@ -23,6 +23,7 @@ PI3_WHEELHOUSE="${PI3_WHEELHOUSE:-${PROJECT_ROOT}/wheelhouse/pi3x}"
 MOGE_WHEELHOUSE="${MOGE_WHEELHOUSE:-${PROJECT_ROOT}/wheelhouse/cu128}"
 VIPE_WHEELHOUSE="${VIPE_WHEELHOUSE:-${PROJECT_ROOT}/wheelhouse/cu128}"
 VIPE_CUDA_HOME="${VIPE_CUDA_HOME:-}"
+FORCE_EDITABLE_REINSTALL="${FORCE_EDITABLE_REINSTALL:-0}"
 
 if [[ ! -d "${SOURCE_ROOT}/Pi3/.git" || ! -d "${SOURCE_ROOT}/MoGe/.git" || ! -d "${SOURCE_ROOT}/vipe/.git" || ! -d "${SOURCE_ROOT}/utils3d-moge/.git" || ! -d "${SOURCE_ROOT}/pipeline/.git" || ! -d "${SOURCE_ROOT}/FlexGEMM/.git" ]]; then
   echo "Missing upstream source. Run scripts/clone_models.sh first." >&2
@@ -52,6 +53,18 @@ install_torch() {
   fi
 }
 
+install_editable_once() {
+  local python="$1"
+  local source="$2"
+  shift 2
+  if [[ "${FORCE_EDITABLE_REINSTALL}" != "1" ]] && \
+    "${python}" "${PROJECT_ROOT}/scripts/editable_install_status.py" "${source}"; then
+    echo "[SKIP] Editable source already installed: ${source}"
+    return 0
+  fi
+  "${python}" -m pip install "$@" -e "${source}"
+}
+
 mkdir -p "${ENV_ROOT}"
 create_env "${ENV_ROOT}/pi3x"
 create_env "${ENV_ROOT}/moge3"
@@ -61,8 +74,8 @@ create_env "${ENV_ROOT}/vipe"
 install_torch "${ENV_ROOT}/pi3x/bin/python" "${PI3_TORCH_INDEX_URL}" \
   "${PI3_WHEELHOUSE}" torch==2.5.1 torchvision==0.20.1
 "${ENV_ROOT}/pi3x/bin/python" -m pip install -r "${SOURCE_ROOT}/Pi3/requirements.txt"
-"${ENV_ROOT}/pi3x/bin/python" -m pip install -e "${SOURCE_ROOT}/Pi3"
-"${ENV_ROOT}/pi3x/bin/python" -m pip install --no-deps -e "${PROJECT_ROOT}"
+install_editable_once "${ENV_ROOT}/pi3x/bin/python" "${SOURCE_ROOT}/Pi3"
+install_editable_once "${ENV_ROOT}/pi3x/bin/python" "${PROJECT_ROOT}" --no-deps
 "${ENV_ROOT}/pi3x/bin/python" -m pip install scipy tqdm
 
 # MoGe-3 requires NumPy 2.x and adds Triton/FlexGEMM-based sparse refinement.
@@ -70,10 +83,10 @@ install_torch "${ENV_ROOT}/moge3/bin/python" "${MOGE_TORCH_INDEX_URL}" \
   "${MOGE_WHEELHOUSE}" torch torchvision
 "${ENV_ROOT}/moge3/bin/python" -m pip install \
   -r "${PROJECT_ROOT}/requirements/moge3-runtime.txt"
-"${ENV_ROOT}/moge3/bin/python" -m pip install -e "${SOURCE_ROOT}/utils3d-moge"
-"${ENV_ROOT}/moge3/bin/python" -m pip install -e "${SOURCE_ROOT}/pipeline"
-"${ENV_ROOT}/moge3/bin/python" -m pip install -e "${SOURCE_ROOT}/FlexGEMM"
-"${ENV_ROOT}/moge3/bin/python" -m pip install --no-deps -e "${SOURCE_ROOT}/MoGe"
+install_editable_once "${ENV_ROOT}/moge3/bin/python" "${SOURCE_ROOT}/utils3d-moge"
+install_editable_once "${ENV_ROOT}/moge3/bin/python" "${SOURCE_ROOT}/pipeline"
+install_editable_once "${ENV_ROOT}/moge3/bin/python" "${SOURCE_ROOT}/FlexGEMM"
+install_editable_once "${ENV_ROOT}/moge3/bin/python" "${SOURCE_ROOT}/MoGe" --no-deps
 
 # VIPE builds a CUDA extension during installation; nvcc and CUDA-enabled Torch are required.
 install_torch "${ENV_ROOT}/vipe/bin/python" "${VIPE_TORCH_INDEX_URL}" \
