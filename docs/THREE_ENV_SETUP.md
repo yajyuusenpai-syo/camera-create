@@ -322,6 +322,11 @@ source .envs/vipe/bin/activate
 常见错误：
 
 - `No module named venv`：安装 `python3.10-venv`。
+- 批处理的最终视频 lease 固定保存在输入根目录的
+  `.camera_create_ckpt/video_leases/`，不再随 `run_id` 或自定义 checkpoint 目录变化。
+  因此不同参数、不同 run ID 的两个活任务也不能同时发布同一视频。心跳持续失败会在
+  lease 超时前使当前 worker 放弃发布；`claimed_elsewhere > 0` 也会返回非零退出码，
+  不再把“所有任务均被占用”误报成成功。
 - 重跑脚本时出现 `Building editable`、`Attempting uninstall`：这不是联网下载，而是
   pip 重建源码链接。新版脚本会检查 PEP 610 的 `direct_url.json`；同一 Python 环境
   已经指向同一源码目录时会输出 `[SKIP]`，Pi3、camera-create、utils3d-moge、

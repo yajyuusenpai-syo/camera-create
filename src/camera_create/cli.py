@@ -354,7 +354,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 1 if report["failed"] or report["worker_crashes"] else 0
+        return 1 if any(
+            report[name] for name in ("failed", "worker_crashes", "claimed_elsewhere")
+        ) else 0
     if not input_path.is_file():
         raise FileNotFoundError(f"Input does not exist: {input_path}")
     if args.target_fps <= 0 or args.max_frames <= 0 or args.max_video_seconds <= 0:

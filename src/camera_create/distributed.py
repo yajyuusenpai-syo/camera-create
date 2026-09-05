@@ -130,6 +130,7 @@ class TaskLease:
         self.timeout_seconds = timeout_seconds
         self.token = uuid.uuid4().hex
         self._stop = threading.Event()
+        self._lost = threading.Event()
         self._thread: threading.Thread | None = None
 
     @property
@@ -182,6 +183,30 @@ class TaskLease:
             return True
         if time.time() - modified <= self.timeout_seconds:
             return False
+        try:
+            owner = json.loads(self.owner_path.read_text(encoding="utf-8"))
+            if owner.get("hostname") == socket.gethostname():
+                pid = int(owner["pid"])
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    return False
+                else:
+                    return False
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+        try:
+            current = (
+                heartbeat.stat().st_mtime
+                if heartbeat.exists()
+                else self.path.stat().st_mtime
+            )
+        except FileNotFoundError:
+            return True
+        if current != modified or time.time() - current <= self.timeout_seconds:
+            return False
         stale = self.path.with_name(f"{self.path.name}.stale-{uuid.uuid4().hex}")
         try:
             self.path.rename(stale)
@@ -191,19 +216,41 @@ class TaskLease:
         return True
 
     def _heartbeat_loop(self) -> None:
-        """Refresh the lease while long-running model subprocesses are active."""
+        """Refresh the lease and fence the owner before a stale takeover is possible."""
         interval = max(1.0, min(60.0, self.timeout_seconds / 3.0))
+        last_success = time.monotonic()
         while not self._stop.wait(interval):
             try:
+                owner = json.loads(self.owner_path.read_text(encoding="utf-8"))
+                if owner.get("token") != self.token:
+                    self._lost.set()
+                    return
                 self.heartbeat_path.touch()
-            except OSError:
-                return
+            except (OSError, json.JSONDecodeError):
+                if time.monotonic() - last_success >= self.timeout_seconds / 2.0:
+                    self._lost.set()
+                    return
+            else:
+                last_success = time.monotonic()
+
+    def assert_owned(self) -> None:
+        """Refuse publication after heartbeat loss or ownership replacement."""
+        if self._lost.is_set():
+            raise RuntimeError(f"Lease heartbeat was lost: {self.path}")
+        try:
+            owner = json.loads(self.owner_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(f"Cannot verify lease ownership: {self.path}") from error
+        if owner.get("token") != self.token:
+            raise RuntimeError(f"Lease ownership changed while processing: {self.path}")
 
     def release(self) -> None:
         """Release only a lease still owned by this exact process invocation."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        if self._lost.is_set():
+            return
         try:
             owner = json.loads(self.owner_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

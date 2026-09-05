@@ -97,6 +97,15 @@ def camera_artifact_dir(video: Path) -> Path:
     return video.parent / f"{video.name}.camera"
 
 
+def video_lease_path(input_root: Path, video: Path) -> Path:
+    """Return a run-independent lock path for one canonical output video."""
+    root = input_root.resolve()
+    canonical = video.resolve()
+    relative = canonical.relative_to(root).as_posix()
+    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:32]
+    return root / ".camera_create_ckpt" / "video_leases" / f"{digest}.lease"
+
+
 def valid_existing_output(
     video: Path,
     target_fps: float | None = None,
@@ -358,6 +367,7 @@ def _worker_main(
             pass
     _atomic_checkpoint(checkpoint_path, state)
     for video in tasks:
+        pending_output: Path | None = None
         relative = video.relative_to(options.input_root).as_posix()
         job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
         job_root = checkpoint_path.parent / "stage_cache" / (
@@ -379,7 +389,7 @@ def _worker_main(
             progress_queue.put(("skipped", global_worker_id, relative, ""))
             continue
         lease = TaskLease(
-            checkpoint_path.parent / "leases" / f"{job_key}.lease",
+            video_lease_path(options.input_root, video),
             global_worker_id,
             options.lease_timeout_seconds,
         )
@@ -427,15 +437,21 @@ def _worker_main(
             CameraCreatePipeline(options.model_paths, pipeline_options).run(
                 normalized, result_dir, job_root / "pipeline"
             )
+            pending_output = camera_json_path(video).with_name(
+                f".{camera_json_path(video).name}.{lease.token}.pending"
+            )
+            lease.assert_owned()
             payload = export_camera_json_v2(
                 result_dir,
-                camera_json_path(video),
+                pending_output,
                 video.name,
                 source_fps,
                 options.target_fps,
                 options.max_frames,
                 applied_seconds,
             )
+            lease.assert_owned()
+            pending_output.replace(camera_json_path(video))
             state["tasks"][relative] = {
                 "status": "completed",
                 "output": str(camera_json_path(video)),
@@ -445,6 +461,8 @@ def _worker_main(
                 shutil.rmtree(job_root, ignore_errors=True)
             event = ("completed", global_worker_id, relative, "")
         except Exception as error:  # noqa: BLE001 - isolate failure to one video
+            if pending_output is not None:
+                pending_output.unlink(missing_ok=True)
             detail = "".join(
                 traceback.format_exception(type(error), error, error.__traceback__)
             )

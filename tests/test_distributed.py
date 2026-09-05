@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from camera_create.batch import BatchOptions, run_batch
+from camera_create.batch import BatchOptions, run_batch, video_lease_path
 from camera_create.cli import build_parser, main
 from camera_create.config import ModelPaths
 from camera_create.distributed import (
@@ -75,11 +75,32 @@ def test_task_lease_is_exclusive_and_releasable(tmp_path: Path) -> None:
     first = TaskLease(path, global_worker_id=0, timeout_seconds=60)
     second = TaskLease(path, global_worker_id=1, timeout_seconds=60)
     assert first.acquire()
+    first.assert_owned()
     assert not second.acquire()
     first.release()
     assert second.acquire()
     second.release()
     assert not path.exists()
+
+
+def test_video_lease_is_independent_of_run_namespace(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    video = input_root / "nested" / "video.mp4"
+    video.parent.mkdir(parents=True)
+    video.touch()
+
+    expected = video_lease_path(input_root, video)
+
+    assert expected.parent == input_root / ".camera_create_ckpt" / "video_leases"
+    assert "run_" not in str(expected)
+
+
+def test_released_lease_fails_ownership_check(tmp_path: Path) -> None:
+    lease = TaskLease(tmp_path / "job.lease", 0, 60)
+    assert lease.acquire()
+    lease.release()
+    with pytest.raises(RuntimeError, match="verify lease ownership"):
+        lease.assert_owned()
 
 
 def test_task_lease_recovers_expired_owner(tmp_path: Path) -> None:
