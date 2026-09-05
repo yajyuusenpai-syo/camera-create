@@ -36,13 +36,16 @@ def default_environment_executable(environment: str, executable: str = "python")
 
 
 def _require_executable(path: Path, model: str) -> Path:
-    resolved = path.expanduser().resolve()
-    if not resolved.is_file():
+    # Do not use Path.resolve() here. A POSIX venv's bin/python is commonly a
+    # symlink to the system interpreter; resolving it discards the venv path,
+    # so Python no longer discovers the adjacent pyvenv.cfg.
+    absolute = Path(os.path.abspath(path.expanduser()))
+    if not absolute.is_file():
         raise FileNotFoundError(
-            f"{model} environment executable not found: {resolved}. "
+            f"{model} environment executable not found: {absolute}. "
             "Run scripts/setup_three_envs.sh or pass the matching CLI option."
         )
-    return resolved
+    return absolute
 
 
 def _run(args: list[str], model: str) -> None:

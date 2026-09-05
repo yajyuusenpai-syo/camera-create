@@ -1,11 +1,13 @@
 """Unit tests for cross-environment depth-cache validation."""
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from camera_create.worker_runner import (
+    _require_executable,
     ensure_matching_workers,
     load_worker_cache,
     run_pi3x_worker,
@@ -77,8 +79,23 @@ def test_pi3x_worker_uses_selected_interpreter(
         True,
         True,
     )
-    assert Path(invoked[0]) == executable.resolve()
+    assert Path(invoked[0]) == executable.absolute()
     assert Path(invoked[1]).name == "run_pi3x_worker.py"
     assert "--disable-cudnn" in invoked
     assert "--disable-sdp" in invoked
     assert result.frame_count == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX venv Python uses symlinks")
+def test_venv_python_symlink_is_not_resolved(tmp_path: Path) -> None:
+    system_python = tmp_path / "usr" / "bin" / "python3.10"
+    system_python.parent.mkdir(parents=True)
+    system_python.touch()
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(system_python)
+
+    selected = _require_executable(venv_python, "Pi3X")
+
+    assert selected == venv_python.absolute()
+    assert selected != system_python.absolute()
