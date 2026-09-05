@@ -322,6 +322,28 @@ source .envs/vipe/bin/activate
 常见错误：
 
 - `No module named venv`：安装 `python3.10-venv`。
+- VIPE 在 `Preparing editable metadata` 阶段访问 GitLab 并报
+  `urllib.error.URLError`：VIPE v1.2.0 的 `setup.py` 会在 Eigen 头文件缺失时主动
+  下载 Eigen 3.4。新版 `setup_vipe.py` 默认禁止这种隐式下载，并依次查找当前环境、
+  `/usr/include/eigen3` 和 `/usr/local/include/eigen3`。开发机可执行：
+
+  ```bash
+  apt-get install -y libeigen3-dev
+  VIPE_CUDA_HOME=/path/to/cuda-12.8 bash scripts/setup_three_envs.sh
+  ```
+
+  如果不能使用 apt，可从已经成功编译 VIPE 的测试服务器搬运
+  `third_party/vipe/csrc/include/eigen3/Eigen/`，然后在开发机直接放回相同位置；也可以：
+
+  ```bash
+  .envs/vipe/bin/python scripts/setup_vipe.py \
+    --vipe-source third_party/vipe \
+    --eigen-source /path/to/eigen3 \
+    --constraint requirements/vipe-constraints.txt
+  ```
+
+  `--eigen-source` 可以指向包含 `Eigen/` 的 `eigen3/`，也可直接指向 `Eigen/`。
+  只有确认开发机能访问 GitLab 时才使用 `--allow-eigen-download`。
 - `torch.cuda.is_available() == False`：wheel、驱动或 GPU 容器映射不匹配。
 - VIPE 安装时报 `torch.version.cuda is None`：误装了 CPU Torch。
 - VIPE 编译找不到 `nvcc`：安装匹配的 CUDA toolkit，并设置正确 `CUDA_HOME`。

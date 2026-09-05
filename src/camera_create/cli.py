@@ -164,13 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--gpu-ids",
-        default="0",
+        default="0,1,2,3",
         help="Batch mode physical GPU ids, comma separated; for example 0,1,2,3",
     )
     parser.add_argument(
         "--workers-per-gpu",
         type=int,
-        default=1,
+        default=4,
         help="Batch pipelines per GPU; increase only after measuring VRAM",
     )
     parser.add_argument(

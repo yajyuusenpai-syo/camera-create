@@ -32,6 +32,49 @@ def vipe_build_environment() -> dict[str, str]:
     return environment
 
 
+def prepare_eigen_headers(
+    vipe_source: Path,
+    eigen_source: Path | None = None,
+    *,
+    allow_download: bool = False,
+) -> Path | None:
+    """Seed Eigen headers so VIPE metadata generation never downloads unexpectedly."""
+    target = vipe_source / "csrc" / "include" / "eigen3" / "Eigen"
+    if target.is_dir():
+        return target
+
+    candidates: list[Path] = []
+    if eigen_source is not None:
+        candidates.append(eigen_source.expanduser())
+    environment_source = os.environ.get("VIPE_EIGEN_SOURCE")
+    if environment_source:
+        candidates.append(Path(environment_source).expanduser())
+    candidates.extend(
+        [
+            Path(sys.prefix) / "include" / "eigen3",
+            Path("/usr/include/eigen3"),
+            Path("/usr/local/include/eigen3"),
+        ]
+    )
+
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        eigen_dir = candidate if candidate.name == "Eigen" else candidate / "Eigen"
+        if eigen_dir.is_dir():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(eigen_dir, target)
+            print(f"Seeded VIPE Eigen headers from {eigen_dir}")
+            return target
+
+    if allow_download:
+        return None
+    raise RuntimeError(
+        "VIPE Eigen 3.4 headers are missing. Install libeigen3-dev, copy the "
+        "test-server Eigen directory, or pass --eigen-source /path/to/eigen3. "
+        "Use --allow-eigen-download only when gitlab.com is reachable."
+    )
+
+
 def patch_factory(factory_path: Path) -> None:
     """Add the cached backend branch to VIPE's model factory when absent."""
     source = factory_path.read_text(encoding="utf-8")
@@ -108,6 +151,16 @@ def main() -> int:
         action="store_true",
         help="Do not resolve dependencies; useful when repairing an existing environment.",
     )
+    parser.add_argument(
+        "--eigen-source",
+        type=Path,
+        help="Offline Eigen include root or its Eigen directory.",
+    )
+    parser.add_argument(
+        "--allow-eigen-download",
+        action="store_true",
+        help="Allow VIPE upstream setup.py to fetch Eigen 3.4 from GitLab.",
+    )
     parser.add_argument("--skip-install", action="store_true")
     args = parser.parse_args()
     vipe_source = args.vipe_source.resolve()
@@ -126,6 +179,11 @@ def main() -> int:
         vipe_source / "vipe" / "slam" / "components" / "buffer.py",
     )
     if not args.skip_install:
+        prepare_eigen_headers(
+            vipe_source,
+            args.eigen_source,
+            allow_download=args.allow_eigen_download,
+        )
         command = [
             sys.executable,
             "-m",
