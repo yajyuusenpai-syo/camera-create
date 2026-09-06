@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from camera_create.artifacts import export_camera_json_v2
 from camera_create.batch import (
@@ -15,6 +16,7 @@ from camera_create.batch import (
     discover_videos,
     prepare_video,
     valid_existing_output,
+    validate_unique_camera_outputs,
 )
 
 
@@ -29,9 +31,19 @@ def test_recursive_discovery_and_static_assignment(tmp_path: Path) -> None:
     videos = discover_videos(tmp_path, (".mp4", ".mkv"))
     assert videos == [first.resolve(), second.resolve()]
     assert assign_tasks(videos, 2) == [[first.resolve()], [second.resolve()]]
-    assert camera_json_path(first).name == "cam_a.MP4.json"
+    assert camera_json_path(first).name == "cam_a.json"
     assert camera_artifact_dir(first).name == "a.MP4.camera"
     assert camera_artifact_dir(second).parent == nested.resolve()
+
+
+def test_duplicate_stems_in_one_directory_are_rejected(tmp_path: Path) -> None:
+    first = tmp_path / "same.mp4"
+    second = tmp_path / "same.mkv"
+    first.touch()
+    second.touch()
+
+    with pytest.raises(ValueError, match="same cam_<stem>.json"):
+        validate_unique_camera_outputs([first, second])
 
 
 def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:

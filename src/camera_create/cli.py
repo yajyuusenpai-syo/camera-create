@@ -245,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help="Batch mode: recompute valid existing cam_<video>.json files",
+        help="Batch mode: recompute valid existing cam_<video-stem>.json files",
     )
     parser.add_argument("--ffmpeg-command", default="ffmpeg")
     return parser

@@ -88,8 +88,8 @@ def discover_videos(root: Path, extensions: tuple[str, ...]) -> list[Path]:
 
 
 def camera_json_path(video: Path) -> Path:
-    """Place one camera JSON beside its source while preserving the full filename."""
-    return video.parent / f"cam_{video.name}.json"
+    """Place one camera JSON beside its source using the extension-free stem."""
+    return video.parent / f"cam_{video.stem}.json"
 
 
 def camera_artifact_dir(video: Path) -> Path:
@@ -101,9 +101,27 @@ def video_lease_path(input_root: Path, video: Path) -> Path:
     """Return a run-independent lock path for one canonical output video."""
     root = input_root.resolve()
     canonical = video.resolve()
-    relative = canonical.relative_to(root).as_posix()
+    relative = camera_json_path(canonical).relative_to(root).as_posix()
     digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:32]
     return root / ".camera_create_ckpt" / "video_leases" / f"{digest}.lease"
+
+
+def validate_unique_camera_outputs(videos: list[Path]) -> None:
+    """Reject source files that would map to the same extension-free JSON name."""
+    grouped: dict[Path, list[Path]] = {}
+    for video in videos:
+        grouped.setdefault(camera_json_path(video), []).append(video)
+    collisions = {
+        output: sources for output, sources in grouped.items() if len(sources) > 1
+    }
+    if collisions:
+        detail = "; ".join(
+            f"{output}: {', '.join(str(source) for source in sources)}"
+            for output, sources in sorted(collisions.items(), key=lambda item: str(item[0]))
+        )
+        raise ValueError(
+            "Multiple videos would produce the same cam_<stem>.json output: " + detail
+        )
 
 
 def valid_existing_output(
@@ -506,6 +524,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
     options.model_paths.validate_depth_models()
     videos = discover_videos(options.input_root, options.extensions)
+    validate_unique_camera_outputs(videos)
     local_worker_count = len(options.gpu_ids) * options.workers_per_gpu
     expected_launcher_processes = options.num_nodes * len(options.gpu_ids)
     if (

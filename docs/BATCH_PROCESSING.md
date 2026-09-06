@@ -4,11 +4,11 @@
 
 ```text
 dataset/a/clip.mp4
-dataset/a/cam_clip.mp4.json
+dataset/a/cam_clip.json
 dataset/a/clip.mp4.camera/          # NPY 与 camera_report.json
 
 dataset/b/movie.mkv
-dataset/b/cam_movie.mkv.json
+dataset/b/cam_movie.json
 dataset/b/movie.mkv.camera/         # NPY 与 camera_report.json
 ```
 
@@ -167,7 +167,7 @@ export CAMERA_CREATE_DISABLE_SDP=1
 
 每个节点只汇报自己的 `videos_assigned` 和进度，避免8台机器竞争覆盖一个
 `summary.json`。判断全局完成时，应确认8个 node summary 都存在，并验证输入目录下
-每个视频都有有效的 `cam_<视频名>.json`。节点故障后使用相同 node rank、run id 和
+每个视频都有有效的 `cam_<视频 stem>.json`。节点故障后使用相同 node rank、run id 和
 参数重新启动；对应全局 worker checkpoint 与失败视频的 stage cache 会继续复用。
 
 也可以使用包装脚本：
@@ -215,7 +215,7 @@ checkpoint 默认保存在：
 `summary.json`，并写一份相同内容的 `summary_node_000.json`，兼容已有调用。
 
 每个 worker 在任务开始、成功或失败后原子更新自己的 JSON。重新执行相同命令时，
-完整且满足当前 FPS/帧数/时长配置的 `cam_<原文件名>.json` 会跳过；失败或不完整的结果
+完整且满足当前 FPS/帧数/时长配置的 `cam_<原文件 stem>.json` 会跳过；失败或不完整的结果
 会从最后一个有效阶段继续：Pi3X、MoGe-3 和融合 metric depth 均不会重复推理，
 VIPE 失败时只重跑 VIPE。worker JSON 的失败条目会记录 `stage_cache` 路径与
 `completed_stages`；NPZ 和 JSON 均采用临时文件加原子改名，半写文件不会被复用。

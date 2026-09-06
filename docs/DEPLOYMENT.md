@@ -160,7 +160,7 @@ VIPE 资产，只适合刚创建完环境时使用。
 camera-create --input /data/input.mp4 --target-fps 24 --max-frames 241
 ```
 
-输出固定写在原视频旁边：`cam_input.mp4.json` 和 `input.mp4.camera/`。旧版
+输出固定写在原视频旁边：`cam_input.json` 和 `input.mp4.camera/`。旧版
 `--output` 仅为命令兼容而保留，传入后会给出弃用提示并被忽略。
 
 单视频运行会在输入目录的 `.camera_create_ckpt/` 原子保存 Pi3X、MoGe-3、融合 metric
