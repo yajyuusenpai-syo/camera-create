@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from camera_create.artifacts import export_camera_json_v2
 from camera_create.batch import (
+    BatchOptions,
+    _start_depth_service_group,
     assign_tasks,
     camera_artifact_dir,
     camera_json_path,
@@ -20,6 +24,9 @@ from camera_create.batch import (
     validate_existing_output_owners,
     validate_unique_camera_outputs,
 )
+from camera_create.config import ModelPaths
+from camera_create.pipeline import PipelineOptions
+from camera_create.worker_runner import DepthServiceEndpoint
 
 
 def test_recursive_discovery_and_static_assignment(tmp_path: Path) -> None:
@@ -77,6 +84,40 @@ def test_manifest_rejects_missing_duplicate_and_unsupported_paths(tmp_path: Path
         load_video_manifest(missing, (".mp4",))
     with pytest.raises(ValueError, match="Unsupported video extension"):
         load_video_manifest(unsupported, (".mp4",))
+
+
+def test_persistent_model_group_starts_all_gpus_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    barrier = threading.Barrier(4)
+
+    def fake_start(_model, _python, _checkpoint, gpu_id, _ready, **_kwargs):
+        barrier.wait(timeout=2)
+        return SimpleNamespace(
+            endpoint=DepthServiceEndpoint("127.0.0.1", 20000 + gpu_id, "00" * 32),
+            stop=lambda: None,
+        )
+
+    monkeypatch.setattr("camera_create.batch.start_depth_service", fake_start)
+    options = BatchOptions(
+        input_manifest=tmp_path / "clip.txt",
+        checkpoint_root=tmp_path / "state",
+        model_paths=ModelPaths(tmp_path / "pi3x", tmp_path / "moge3", tmp_path / "vipe"),
+        pipeline_options=PipelineOptions(),
+        gpu_ids=(0, 1, 2, 3),
+    )
+
+    services, endpoints = _start_depth_service_group(
+        "Pi3X", options.gpu_ids, options, tmp_path / "services"
+    )
+
+    assert len(services) == 4
+    assert {gpu_id: endpoint.port for gpu_id, endpoint in endpoints.items()} == {
+        0: 20000,
+        1: 20001,
+        2: 20002,
+        3: 20003,
+    }
 
 
 def test_duplicate_stems_in_one_directory_are_rejected(tmp_path: Path) -> None:

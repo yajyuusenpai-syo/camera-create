@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,66 @@ def load_video_manifest(path: Path, extensions: tuple[str, ...]) -> list[Path]:
 def _task_name(video: Path) -> str:
     """Return the stable absolute identity stored in manifests and checkpoints."""
     return video.resolve().as_posix()
+
+
+def _start_depth_service_group(
+    model: str,
+    gpu_ids: tuple[int, ...],
+    options: BatchOptions,
+    service_root: Path,
+) -> tuple[list[DepthServiceProcess], dict[int, DepthServiceEndpoint]]:
+    """Load one model concurrently across GPUs, then expose all ready endpoints."""
+    LOG.info(
+        "Loading persistent %s services in parallel on GPUs %s",
+        model,
+        ",".join(str(gpu_id) for gpu_id in gpu_ids),
+    )
+
+    def launch(gpu_id: int) -> DepthServiceProcess:
+        common = {
+            "max_side": options.pipeline_options.max_inference_side,
+            "disable_cudnn": options.pipeline_options.disable_cudnn,
+            "disable_sdp": options.pipeline_options.disable_sdp,
+        }
+        if model == "Pi3X":
+            return start_depth_service(
+                model,
+                options.pipeline_options.pi3x_python,
+                options.model_paths.pi3x,
+                gpu_id,
+                service_root / f"pi3x_gpu_{gpu_id}.json",
+                chunk=options.pipeline_options.pi3x_chunk,
+                stride=options.pipeline_options.pi3x_stride,
+                **common,
+            )
+        return start_depth_service(
+            model,
+            options.pipeline_options.moge3_python,
+            options.model_paths.moge3,
+            gpu_id,
+            service_root / f"moge3_gpu_{gpu_id}.json",
+            refine_steps=options.pipeline_options.moge3_refine_steps,
+            use_fp16=options.pipeline_options.moge3_fp16,
+            **common,
+        )
+
+    completed: dict[int, DepthServiceProcess] = {}
+    failures: list[BaseException] = []
+    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
+        futures = {executor.submit(launch, gpu_id): gpu_id for gpu_id in gpu_ids}
+        for future in as_completed(futures):
+            gpu_id = futures[future]
+            try:
+                completed[gpu_id] = future.result()
+                LOG.info("Persistent %s service ready on GPU %d", model, gpu_id)
+            except BaseException as error:  # noqa: BLE001 - clean the whole group
+                failures.append(error)
+    if failures:
+        for service in completed.values():
+            service.stop()
+        raise RuntimeError(f"Failed to load persistent {model} service group") from failures[0]
+    ordered = [completed[gpu_id] for gpu_id in gpu_ids]
+    return ordered, {gpu_id: completed[gpu_id].endpoint for gpu_id in gpu_ids}
 
 
 def camera_json_path(video: Path) -> Path:
@@ -784,38 +845,14 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     if service_gpu_ids:
         service_root = Path(tempfile.mkdtemp(prefix="camera-create-depth-services-"))
         try:
-            for gpu_id in service_gpu_ids:
-                LOG.info("Loading persistent Pi3X service on physical GPU %d", gpu_id)
-                service = start_depth_service(
-                    "Pi3X",
-                    options.pipeline_options.pi3x_python,
-                    options.model_paths.pi3x,
-                    gpu_id,
-                    service_root / f"pi3x_gpu_{gpu_id}.json",
-                    chunk=options.pipeline_options.pi3x_chunk,
-                    stride=options.pipeline_options.pi3x_stride,
-                    max_side=options.pipeline_options.max_inference_side,
-                    disable_cudnn=options.pipeline_options.disable_cudnn,
-                    disable_sdp=options.pipeline_options.disable_sdp,
-                )
-                services.append(service)
-                pi3x_services[gpu_id] = service.endpoint
-            for gpu_id in service_gpu_ids:
-                LOG.info("Loading persistent MoGe-3 service on physical GPU %d", gpu_id)
-                service = start_depth_service(
-                    "MoGe-3",
-                    options.pipeline_options.moge3_python,
-                    options.model_paths.moge3,
-                    gpu_id,
-                    service_root / f"moge3_gpu_{gpu_id}.json",
-                    max_side=options.pipeline_options.max_inference_side,
-                    refine_steps=options.pipeline_options.moge3_refine_steps,
-                    use_fp16=options.pipeline_options.moge3_fp16,
-                    disable_cudnn=options.pipeline_options.disable_cudnn,
-                    disable_sdp=options.pipeline_options.disable_sdp,
-                )
-                services.append(service)
-                moge3_services[gpu_id] = service.endpoint
+            pi3x_group, pi3x_services = _start_depth_service_group(
+                "Pi3X", service_gpu_ids, options, service_root
+            )
+            services.extend(pi3x_group)
+            moge3_group, moge3_services = _start_depth_service_group(
+                "MoGe-3", service_gpu_ids, options, service_root
+            )
+            services.extend(moge3_group)
         except Exception:
             stop_depth_services()
             raise
