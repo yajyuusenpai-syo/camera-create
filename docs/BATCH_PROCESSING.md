@@ -4,12 +4,17 @@
 单个视频或目录。推荐先将完整数据集确定性地切成若干份，再为每一份启动一个互相
 独立的单机器任务。每个任务内部仍支持多 GPU、多进程、checkpoint/resume 和 tqdm。
 
-默认情况下，每张GPU启动一个常驻Pi3X服务和一个常驻MoGe-3服务；同卡所有camera
-worker共享这两个服务，因此两个深度模型在整份清单中各只加载一次。每个服务串行
-处理本卡请求，避免常驻多份模型导致显存爆炸。VIPE仍然为每个视频单独启动和退出。
+默认情况下，每张GPU启动4个常驻Pi3X服务和4个常驻MoGe-3服务，并启动4个camera
+worker。每个worker固定绑定同卡的一组Pi3X/MoGe-3副本，因此4条视频流水线可以并行
+经过两个深度模型；每个模型副本在整份清单中只加载一次。VIPE仍然为每个视频单独
+启动和退出。
 调试旧行为时可传 `--no-persistent-depth-services`，恢复每个视频重新加载深度模型。
-启动阶段会先在所有选定GPU上并行加载Pi3X并等待全部就绪，再并行加载MoGe-3；不会
-把Pi3X和MoGe-3两组同时加载。VIPE启动和执行逻辑不受该优化影响。
+启动阶段先加载全部Pi3X，再加载全部MoGe-3；每个副本波次会跨所有选定GPU并行，
+避免共享/FUSE盘同时承受“GPU数×副本数”个权重读取。VIPE逻辑不受该优化影响。
+
+注意：实测单卡一组Pi3X+MoGe-3约占17GB，4组基础常驻显存约68GB，还未计入VIPE、
+视频张量及其他占卡进程。80GB卡必须先用少量视频观察峰值；若OOM，优先改成
+`--depth-services-per-gpu 2 --workers-per-gpu 4`，此时4个worker会轮询共享2组服务。
 
 ## 生成8份清单
 
@@ -57,7 +62,8 @@ exec "$PWD/.envs/pi3x/bin/python" cli.py \
   --max-video-seconds 10.06 \
   --lease-timeout-seconds 900 \
   --gpu-ids 0,1,2,3,4,5,6,7 \
-  --workers-per-gpu 6 \
+  --workers-per-gpu 4 \
+  --depth-services-per-gpu 4 \
   --disable-cudnn \
   --disable-sdp \
   --pi3x-python "$PWD/.envs/pi3x/bin/python" \
@@ -70,7 +76,8 @@ exec "$PWD/.envs/pi3x/bin/python" cli.py \
 ```bash
 bash scripts/run_batch.sh /path/to/clip_1.txt \
   --gpu-ids 0,1,2,3,4,5,6,7 \
-  --workers-per-gpu 6 \
+  --workers-per-gpu 4 \
+  --depth-services-per-gpu 4 \
   --disable-cudnn \
   --disable-sdp
 ```
@@ -132,7 +139,8 @@ lease以最终JSON绝对路径为身份，与清单位置无关。即使清单�
 --max-frames 241
 --max-video-seconds 10.06
 --gpu-ids 0,1,2,3,4,5,6,7
---workers-per-gpu 6
+--workers-per-gpu 4
+--depth-services-per-gpu 4
 --lease-timeout-seconds 900
 --checkpoint-dir PATH
 --overwrite

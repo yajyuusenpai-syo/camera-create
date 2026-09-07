@@ -25,7 +25,8 @@ fi
 exec "${PYTHON_BIN}" "${PROJECT_ROOT}/cli.py" \
   --input "${INPUT_MANIFEST}" \
   --gpu-ids 0,1,2,3,4,5,6,7 \
-  --workers-per-gpu 6 \
+  --workers-per-gpu 4 \
+  --depth-services-per-gpu 4 \
   --disable-cudnn \
   --disable-sdp \
   "${EXTRA_ARGS[@]}"

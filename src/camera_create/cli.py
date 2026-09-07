@@ -146,6 +146,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Batch pipelines per GPU; increase only after measuring VRAM",
     )
     parser.add_argument(
+        "--depth-services-per-gpu",
+        type=int,
+        default=4,
+        help=(
+            "Persistent Pi3X and MoGe-3 replicas per GPU; workers bind to replicas "
+            "round-robin (default: 4)"
+        ),
+    )
+    parser.add_argument(
         "--node-rank",
         "--machine-rank",
         "--machine_rank",
@@ -297,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             pipeline_options=options,
             gpu_ids=_parse_gpu_ids(args.gpu_ids),
             workers_per_gpu=args.workers_per_gpu,
+            depth_services_per_gpu=args.depth_services_per_gpu,
             node_rank=args.node_rank,
             num_nodes=args.num_nodes,
             run_id=args.run_id,

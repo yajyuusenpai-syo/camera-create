@@ -63,6 +63,7 @@ class BatchOptions:
     pipeline_options: PipelineOptions
     gpu_ids: tuple[int, ...]
     workers_per_gpu: int = 1
+    depth_services_per_gpu: int = 1
     node_rank: int = 0
     num_nodes: int = 1
     run_id: str | None = None
@@ -165,15 +166,16 @@ def _start_depth_service_group(
     gpu_ids: tuple[int, ...],
     options: BatchOptions,
     service_root: Path,
-) -> tuple[list[DepthServiceProcess], dict[int, DepthServiceEndpoint]]:
-    """Load one model concurrently across GPUs, then expose all ready endpoints."""
+) -> tuple[list[DepthServiceProcess], dict[tuple[int, int], DepthServiceEndpoint]]:
+    """Load model replicas in waves across GPUs and expose their endpoints."""
     LOG.info(
-        "Loading persistent %s services in parallel on GPUs %s",
+        "Loading %d persistent %s services per GPU on GPUs %s",
+        options.depth_services_per_gpu,
         model,
         ",".join(str(gpu_id) for gpu_id in gpu_ids),
     )
 
-    def launch(gpu_id: int) -> DepthServiceProcess:
+    def launch(gpu_id: int, replica_id: int) -> DepthServiceProcess:
         common = {
             "max_side": options.pipeline_options.max_inference_side,
             "disable_cudnn": options.pipeline_options.disable_cudnn,
@@ -185,7 +187,7 @@ def _start_depth_service_group(
                 options.pipeline_options.pi3x_python,
                 options.model_paths.pi3x,
                 gpu_id,
-                service_root / f"pi3x_gpu_{gpu_id}.json",
+                service_root / f"pi3x_gpu_{gpu_id}_replica_{replica_id}.json",
                 chunk=options.pipeline_options.pi3x_chunk,
                 stride=options.pipeline_options.pi3x_stride,
                 **common,
@@ -195,29 +197,48 @@ def _start_depth_service_group(
             options.pipeline_options.moge3_python,
             options.model_paths.moge3,
             gpu_id,
-            service_root / f"moge3_gpu_{gpu_id}.json",
+            service_root / f"moge3_gpu_{gpu_id}_replica_{replica_id}.json",
             refine_steps=options.pipeline_options.moge3_refine_steps,
             use_fp16=options.pipeline_options.moge3_fp16,
             **common,
         )
 
-    completed: dict[int, DepthServiceProcess] = {}
+    completed: dict[tuple[int, int], DepthServiceProcess] = {}
     failures: list[BaseException] = []
-    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
-        futures = {executor.submit(launch, gpu_id): gpu_id for gpu_id in gpu_ids}
-        for future in as_completed(futures):
-            gpu_id = futures[future]
-            try:
-                completed[gpu_id] = future.result()
-                LOG.info("Persistent %s service ready on GPU %d", model, gpu_id)
-            except BaseException as error:  # noqa: BLE001 - clean the whole group
-                failures.append(error)
+    # One replica wave reads the checkpoint concurrently across all GPUs. Starting
+    # every GPU and replica together can overwhelm a shared/FUSE model filesystem.
+    for replica_id in range(options.depth_services_per_gpu):
+        with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
+            futures = {
+                executor.submit(launch, gpu_id, replica_id): gpu_id
+                for gpu_id in gpu_ids
+            }
+            for future in as_completed(futures):
+                gpu_id = futures[future]
+                try:
+                    completed[(gpu_id, replica_id)] = future.result()
+                    LOG.info(
+                        "Persistent %s service replica %d/%d ready on GPU %d",
+                        model,
+                        replica_id + 1,
+                        options.depth_services_per_gpu,
+                        gpu_id,
+                    )
+                except BaseException as error:  # noqa: BLE001 - clean whole group
+                    failures.append(error)
+        if failures:
+            break
     if failures:
         for service in completed.values():
             service.stop()
         raise RuntimeError(f"Failed to load persistent {model} service group") from failures[0]
-    ordered = [completed[gpu_id] for gpu_id in gpu_ids]
-    return ordered, {gpu_id: completed[gpu_id].endpoint for gpu_id in gpu_ids}
+    keys = [
+        (gpu_id, replica_id)
+        for replica_id in range(options.depth_services_per_gpu)
+        for gpu_id in gpu_ids
+    ]
+    ordered = [completed[key] for key in keys]
+    return ordered, {key: completed[key].endpoint for key in keys}
 
 
 def camera_json_path(video: Path) -> Path:
@@ -319,6 +340,14 @@ def assign_tasks(videos: list[Path], worker_count: int) -> list[list[Path]]:
     return [videos[index::worker_count] for index in range(worker_count)]
 
 
+def depth_service_replica_id(
+    local_worker_id: int, workers_per_gpu: int, services_per_gpu: int
+) -> int:
+    """Bind a local camera worker to one same-GPU model replica."""
+    gpu_worker_id = local_worker_id % workers_per_gpu
+    return gpu_worker_id % services_per_gpu
+
+
 def _manifest_payload(
     videos: list[Path], options: BatchOptions, layout: DistributedLayout
 ) -> dict[str, Any]:
@@ -341,6 +370,7 @@ def _manifest_payload(
         "main_process_port": options.main_process_port,
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
+        "depth_services_per_gpu": options.depth_services_per_gpu,
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
@@ -466,6 +496,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         ],
         "gpu_ids": options.gpu_ids,
         "workers_per_gpu": options.workers_per_gpu,
+        "depth_services_per_gpu": options.depth_services_per_gpu,
         "num_nodes": options.num_nodes,
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
@@ -686,6 +717,13 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("At least one GPU id is required")
     if options.workers_per_gpu < 1:
         raise ValueError("workers_per_gpu must be positive")
+    if options.depth_services_per_gpu < 1:
+        raise ValueError("depth_services_per_gpu must be positive")
+    if (
+        options.pipeline_options.persistent_depth_services
+        and options.depth_services_per_gpu > options.workers_per_gpu
+    ):
+        raise ValueError("depth_services_per_gpu cannot exceed workers_per_gpu")
     if options.lease_timeout_seconds <= 0:
         raise ValueError("lease_timeout_seconds must be positive")
     if (
@@ -775,6 +813,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "videos_found": len(videos),
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
+        "depth_services_per_gpu": options.depth_services_per_gpu,
         "node_rank": options.node_rank,
         "num_nodes": options.num_nodes,
         "local_workers": local_worker_count,
@@ -832,8 +871,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
 
     service_root: Path | None = None
     services: list[DepthServiceProcess] = []
-    pi3x_services: dict[int, DepthServiceEndpoint] = {}
-    moge3_services: dict[int, DepthServiceEndpoint] = {}
+    pi3x_services: dict[tuple[int, int], DepthServiceEndpoint] = {}
+    moge3_services: dict[tuple[int, int], DepthServiceEndpoint] = {}
 
     def stop_depth_services() -> None:
         """Stop every persistent depth process owned by this controller."""
@@ -864,6 +903,11 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     for local_worker_id, tasks in enumerate(assignments):
         global_worker_id = layout.global_worker_id(local_worker_id)
         gpu_id = options.gpu_ids[local_worker_id // options.workers_per_gpu]
+        replica_id = depth_service_replica_id(
+            local_worker_id,
+            options.workers_per_gpu,
+            options.depth_services_per_gpu,
+        )
         checkpoint = run_root / f"worker_{global_worker_id:03d}.json"
         process = context.Process(
             target=_worker_main,
@@ -875,8 +919,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
                 options,
                 checkpoint,
                 progress_queue,
-                pi3x_services.get(gpu_id),
-                moge3_services.get(gpu_id),
+                pi3x_services.get((gpu_id, replica_id)),
+                moge3_services.get((gpu_id, replica_id)),
             ),
             name=f"camera-worker-{global_worker_id:03d}-gpu-{gpu_id}",
         )

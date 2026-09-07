@@ -17,6 +17,7 @@ from camera_create.batch import (
     assign_tasks,
     camera_artifact_dir,
     camera_json_path,
+    depth_service_replica_id,
     discover_videos,
     load_video_manifest,
     prepare_video,
@@ -91,10 +92,13 @@ def test_persistent_model_group_starts_all_gpus_concurrently(
 ) -> None:
     barrier = threading.Barrier(4)
 
-    def fake_start(_model, _python, _checkpoint, gpu_id, _ready, **_kwargs):
+    def fake_start(_model, _python, _checkpoint, gpu_id, ready, **_kwargs):
         barrier.wait(timeout=2)
+        replica_id = int(ready.stem.rsplit("_", 1)[-1])
         return SimpleNamespace(
-            endpoint=DepthServiceEndpoint("127.0.0.1", 20000 + gpu_id, "00" * 32),
+            endpoint=DepthServiceEndpoint(
+                "127.0.0.1", 20000 + gpu_id * 10 + replica_id, "00" * 32
+            ),
             stop=lambda: None,
         )
 
@@ -105,19 +109,37 @@ def test_persistent_model_group_starts_all_gpus_concurrently(
         model_paths=ModelPaths(tmp_path / "pi3x", tmp_path / "moge3", tmp_path / "vipe"),
         pipeline_options=PipelineOptions(),
         gpu_ids=(0, 1, 2, 3),
+        depth_services_per_gpu=2,
     )
 
     services, endpoints = _start_depth_service_group(
         "Pi3X", options.gpu_ids, options, tmp_path / "services"
     )
 
-    assert len(services) == 4
-    assert {gpu_id: endpoint.port for gpu_id, endpoint in endpoints.items()} == {
-        0: 20000,
-        1: 20001,
-        2: 20002,
-        3: 20003,
+    assert len(services) == 8
+    assert {key: endpoint.port for key, endpoint in endpoints.items()} == {
+        (0, 0): 20000,
+        (1, 0): 20010,
+        (2, 0): 20020,
+        (3, 0): 20030,
+        (0, 1): 20001,
+        (1, 1): 20011,
+        (2, 1): 20021,
+        (3, 1): 20031,
     }
+
+
+def test_four_workers_bind_one_to_one_to_four_depth_replicas() -> None:
+    assert [depth_service_replica_id(worker, 4, 4) for worker in range(8)] == [
+        0,
+        1,
+        2,
+        3,
+        0,
+        1,
+        2,
+        3,
+    ]
 
 
 def test_duplicate_stems_in_one_directory_are_rejected(tmp_path: Path) -> None:
