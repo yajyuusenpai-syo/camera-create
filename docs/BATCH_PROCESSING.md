@@ -4,6 +4,11 @@
 单个视频或目录。推荐先将完整数据集确定性地切成若干份，再为每一份启动一个互相
 独立的单机器任务。每个任务内部仍支持多 GPU、多进程、checkpoint/resume 和 tqdm。
 
+默认情况下，每张GPU启动一个常驻Pi3X服务和一个常驻MoGe-3服务；同卡所有camera
+worker共享这两个服务，因此两个深度模型在整份清单中各只加载一次。每个服务串行
+处理本卡请求，避免常驻多份模型导致显存爆炸。VIPE仍然为每个视频单独启动和退出。
+调试旧行为时可传 `--no-persistent-depth-services`，恢复每个视频重新加载深度模型。
+
 ## 生成8份清单
 
 以下命令使用 `os.walk` 递归扫描视频，稳定排序后轮询均分，确保各分片的视频数最多
@@ -132,4 +137,5 @@ lease以最终JSON绝对路径为身份，与清单位置无关。即使清单�
 --keep-stage-cache
 --disable-cudnn
 --disable-sdp
+--no-persistent-depth-services
 ```

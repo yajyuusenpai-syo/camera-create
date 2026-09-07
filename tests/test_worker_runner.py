@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from camera_create.worker_runner import (
+    DepthServiceEndpoint,
     _require_executable,
     ensure_matching_workers,
     load_worker_cache,
@@ -83,6 +84,36 @@ def test_pi3x_worker_uses_selected_interpreter(
     assert Path(invoked[1]).name == "run_pi3x_worker.py"
     assert "--disable-cudnn" in invoked
     assert "--disable-sdp" in invoked
+    assert result.frame_count == 2
+
+
+def test_pi3x_worker_can_use_persistent_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "result.npz"
+    requests: list[dict] = []
+
+    def fake_request(_endpoint, request: dict, model: str) -> dict:
+        assert model == "Pi3X"
+        requests.append(request)
+        write_cache(output)
+        return {"ok": True}
+
+    monkeypatch.setattr("camera_create.worker_runner._request_service", fake_request)
+    endpoint = DepthServiceEndpoint("127.0.0.1", 23456, "00" * 32)
+    result = run_pi3x_worker(
+        tmp_path / "unused-python",
+        tmp_path / "input.mp4",
+        tmp_path / "ckpt",
+        output,
+        "cuda:0",
+        8,
+        4,
+        448,
+        service=endpoint,
+    )
+
+    assert requests[0]["command"] == "infer"
     assert result.frame_count == 2
 
 

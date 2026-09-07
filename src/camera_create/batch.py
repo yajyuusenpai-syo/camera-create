@@ -5,11 +5,13 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import multiprocessing as mp
 import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import traceback
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,6 +31,11 @@ from .distributed import (
 )
 from .pipeline import CameraCreatePipeline, PipelineOptions
 from .stage_cache import video_identity
+from .worker_runner import (
+    DepthServiceEndpoint,
+    DepthServiceProcess,
+    start_depth_service,
+)
 
 DEFAULT_VIDEO_EXTENSIONS = (
     ".mp4",
@@ -41,6 +48,8 @@ DEFAULT_VIDEO_EXTENSIONS = (
     ".mpeg",
     ".ts",
 )
+
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -284,6 +293,7 @@ def _manifest_payload(
         "fov_x_deg": options.pipeline_options.fov_x_deg,
         "disable_cudnn": options.pipeline_options.disable_cudnn,
         "disable_sdp": options.pipeline_options.disable_sdp,
+        "persistent_depth_services": options.pipeline_options.persistent_depth_services,
         "model_paths": {
             "pi3x": str(options.model_paths.pi3x),
             "moge3": str(options.model_paths.moge3),
@@ -408,6 +418,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         "fov_x_deg": options.pipeline_options.fov_x_deg,
         "disable_cudnn": options.pipeline_options.disable_cudnn,
         "disable_sdp": options.pipeline_options.disable_sdp,
+        "persistent_depth_services": options.pipeline_options.persistent_depth_services,
         "model_paths": {
             "pi3x": str(options.model_paths.pi3x),
             "moge3": str(options.model_paths.moge3),
@@ -425,6 +436,8 @@ def _worker_main(
     options: BatchOptions,
     checkpoint_path: Path,
     progress_queue: Any,
+    pi3x_service: DepthServiceEndpoint | None,
+    moge3_service: DepthServiceEndpoint | None,
 ) -> None:
     """Run one fixed task partition on one visible GPU and checkpoint every result."""
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -444,7 +457,11 @@ def _worker_main(
         progress_queue.put(("worker_finished", global_worker_id, "", ""))
         return
     pipeline_options = replace(
-        options.pipeline_options, device="cuda:0", keep_work=False
+        options.pipeline_options,
+        device="cuda:0",
+        keep_work=False,
+        pi3x_service=pi3x_service,
+        moge3_service=moge3_service,
     )
     state: dict[str, Any] = {
         "format_version": 1,
@@ -670,6 +687,28 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         )
         for video in videos
     )
+    service_gpu_ids = tuple(
+        gpu_id
+        for gpu_index, gpu_id in enumerate(options.gpu_ids)
+        if options.pipeline_options.persistent_depth_services
+        and (
+            options.overwrite
+            or any(
+            not valid_existing_output(
+                video,
+                options.target_fps,
+                options.max_frames,
+                options.max_video_seconds,
+            )
+            for tasks in assignments[
+                gpu_index
+                * options.workers_per_gpu : (gpu_index + 1)
+                * options.workers_per_gpu
+            ]
+            for video in tasks
+            )
+        )
+    )
     summary = {
         "input_manifest": str(options.input_manifest),
         "videos_found": len(videos),
@@ -709,6 +748,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "allow_vipe_downloads": options.pipeline_options.allow_vipe_downloads,
         "disable_cudnn": options.pipeline_options.disable_cudnn,
         "disable_sdp": options.pipeline_options.disable_sdp,
+        "persistent_depth_services": options.pipeline_options.persistent_depth_services,
+        "persistent_depth_service_gpu_ids": list(service_gpu_ids),
         "pi3x_checkpoint": str(options.model_paths.pi3x),
         "moge3_checkpoint": str(options.model_paths.moge3),
         "vipe_cache": str(options.model_paths.vipe),
@@ -728,6 +769,58 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         atexit.unregister(node_lease.release)
         return result
 
+    service_root: Path | None = None
+    services: list[DepthServiceProcess] = []
+    pi3x_services: dict[int, DepthServiceEndpoint] = {}
+    moge3_services: dict[int, DepthServiceEndpoint] = {}
+
+    def stop_depth_services() -> None:
+        """Stop every persistent depth process owned by this controller."""
+        for service in reversed(services):
+            service.stop()
+        if service_root is not None:
+            shutil.rmtree(service_root, ignore_errors=True)
+
+    if service_gpu_ids:
+        service_root = Path(tempfile.mkdtemp(prefix="camera-create-depth-services-"))
+        try:
+            for gpu_id in service_gpu_ids:
+                LOG.info("Loading persistent Pi3X service on physical GPU %d", gpu_id)
+                service = start_depth_service(
+                    "Pi3X",
+                    options.pipeline_options.pi3x_python,
+                    options.model_paths.pi3x,
+                    gpu_id,
+                    service_root / f"pi3x_gpu_{gpu_id}.json",
+                    chunk=options.pipeline_options.pi3x_chunk,
+                    stride=options.pipeline_options.pi3x_stride,
+                    max_side=options.pipeline_options.max_inference_side,
+                    disable_cudnn=options.pipeline_options.disable_cudnn,
+                    disable_sdp=options.pipeline_options.disable_sdp,
+                )
+                services.append(service)
+                pi3x_services[gpu_id] = service.endpoint
+            for gpu_id in service_gpu_ids:
+                LOG.info("Loading persistent MoGe-3 service on physical GPU %d", gpu_id)
+                service = start_depth_service(
+                    "MoGe-3",
+                    options.pipeline_options.moge3_python,
+                    options.model_paths.moge3,
+                    gpu_id,
+                    service_root / f"moge3_gpu_{gpu_id}.json",
+                    max_side=options.pipeline_options.max_inference_side,
+                    refine_steps=options.pipeline_options.moge3_refine_steps,
+                    use_fp16=options.pipeline_options.moge3_fp16,
+                    disable_cudnn=options.pipeline_options.disable_cudnn,
+                    disable_sdp=options.pipeline_options.disable_sdp,
+                )
+                services.append(service)
+                moge3_services[gpu_id] = service.endpoint
+        except Exception:
+            stop_depth_services()
+            raise
+        atexit.register(stop_depth_services)
+
     context = mp.get_context("spawn")
     progress_queue = context.Queue()
     processes: list[mp.Process] = []
@@ -745,6 +838,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
                 options,
                 checkpoint,
                 progress_queue,
+                pi3x_services.get(gpu_id),
+                moge3_services.get(gpu_id),
             ),
             name=f"camera-worker-{global_worker_id:03d}-gpu-{gpu_id}",
         )
@@ -786,6 +881,9 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             crashed += 1
     result = {**summary, **counts, "worker_crashes": crashed}
     _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
+    if service_root is not None:
+        stop_depth_services()
+        atexit.unregister(stop_depth_services)
     node_lease.release()
     atexit.unregister(node_lease.release)
     return result

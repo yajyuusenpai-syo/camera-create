@@ -23,6 +23,7 @@ from .vipe_runner import (
     run_vipe,
 )
 from .worker_runner import (
+    DepthServiceEndpoint,
     default_environment_executable,
     ensure_matching_workers,
     load_worker_cache,
@@ -58,6 +59,9 @@ class PipelineOptions:
     allow_vipe_downloads: bool = False
     disable_cudnn: bool = False
     disable_sdp: bool = False
+    persistent_depth_services: bool = True
+    pi3x_service: DepthServiceEndpoint | None = None
+    moge3_service: DepthServiceEndpoint | None = None
 
 
 class CameraCreatePipeline:
@@ -116,7 +120,10 @@ class CameraCreatePipeline:
                 stage_cache.completed("pi3x")
             except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
                 pi3x_cache.unlink(missing_ok=True)
-                LOG.info("Running isolated Pi3X worker: %s", self.options.pi3x_python)
+                LOG.info(
+                    "Running %s Pi3X worker",
+                    "persistent" if self.options.pi3x_service else "isolated",
+                )
                 pi3x_result = run_pi3x_worker(
                     self.options.pi3x_python,
                     video,
@@ -128,6 +135,7 @@ class CameraCreatePipeline:
                     self.options.max_inference_side,
                     self.options.disable_cudnn,
                     self.options.disable_sdp,
+                    self.options.pi3x_service,
                 )
                 stage_cache.completed("pi3x")
             fov_x = self.options.fov_x_deg or default_fov_x(
@@ -140,7 +148,8 @@ class CameraCreatePipeline:
             except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
                 moge3_cache.unlink(missing_ok=True)
                 LOG.info(
-                    "Running isolated MoGe-3 worker: %s", self.options.moge3_python
+                    "Running %s MoGe-3 worker",
+                    "persistent" if self.options.moge3_service else "isolated",
                 )
                 moge3_result = run_moge3_worker(
                     self.options.moge3_python,
@@ -154,6 +163,7 @@ class CameraCreatePipeline:
                     self.options.moge3_fp16,
                     self.options.disable_cudnn,
                     self.options.disable_sdp,
+                    self.options.moge3_service,
                 )
                 stage_cache.completed("moge3")
             ensure_matching_workers(pi3x_result, moge3_result)

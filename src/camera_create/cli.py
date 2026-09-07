@@ -116,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--moge3-no-fp16", action="store_true", help="Disable MoGe-3 mixed precision"
     )
+    parser.add_argument(
+        "--no-persistent-depth-services",
+        action="store_true",
+        help="Reload Pi3X/MoGe-3 for every video instead of once per GPU",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
         "--disable-cudnn",
@@ -261,6 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_vipe_downloads=args.allow_vipe_downloads,
         disable_cudnn=args.disable_cudnn,
         disable_sdp=args.disable_sdp,
+        persistent_depth_services=not args.no_persistent_depth_services,
     )
     input_path = args.input.resolve()
     if not input_path.is_file():
