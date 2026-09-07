@@ -13,13 +13,12 @@ The primary entry point is `cli.py`; the package also installs the
 For exact source cloning and isolated environment commands, see
 `docs/THREE_ENV_SETUP.md`. Both standard `venv` and Conda-prefix installation
 scripts are provided; they create the same `.envs/<model>` runtime layout.
-Recursive multi-node/multi-GPU scheduling, shared-manifest validation, atomic task
-leases, per-global-worker checkpoints, resume, tqdm, and `cam_<video stem>.json`
-output are documented in `docs/BATCH_PROCESSING.md`.
+Manifest-driven multi-GPU scheduling, atomic task leases, per-worker checkpoints,
+resume, tqdm, shard generation, and `cam_<video stem>.json` output are documented
+in `docs/BATCH_PROCESSING.md`.
 Each JSON is written beside its source; NPY/report artifacts live in the
-collision-safe `<full video filename>.camera/` sibling directory. Both single
-and directory modes honor `--target-fps`, `--max-frames`, and
-`--max-video-seconds`.
+collision-safe `<full video filename>.camera/` sibling directory. TXT/JSON input
+manifests replace the former single-video and recursive-directory input modes.
 
 Checkpoint layout:
 

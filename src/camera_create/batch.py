@@ -1,4 +1,4 @@
-"""Recursively schedule metric-camera video jobs across isolated GPU worker processes."""
+"""Schedule manifest-listed videos across isolated metric-camera GPU workers."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ DEFAULT_VIDEO_EXTENSIONS = (
 class BatchOptions:
     """Serializable settings shared by all statically assigned batch workers."""
 
-    input_root: Path
+    input_manifest: Path
     checkpoint_root: Path
     model_paths: ModelPaths
     pipeline_options: PipelineOptions
@@ -87,6 +87,69 @@ def discover_videos(root: Path, extensions: tuple[str, ...]) -> list[Path]:
     return sorted(videos, key=lambda path: path.relative_to(root).as_posix())
 
 
+def load_video_manifest(path: Path, extensions: tuple[str, ...]) -> list[Path]:
+    """Load an ordered TXT/JSON video-path shard and validate every source file."""
+    manifest = path.resolve()
+    if not manifest.is_file():
+        raise FileNotFoundError(f"Input manifest does not exist: {manifest}")
+    normalized_extensions = {
+        value.lower() if value.startswith(".") else f".{value.lower()}"
+        for value in extensions
+    }
+    suffix = manifest.suffix.lower()
+    if suffix == ".txt":
+        raw_entries: list[Any] = [
+            line.strip()
+            for line in manifest.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+    elif suffix == ".json":
+        document = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        if isinstance(document, dict):
+            for key in ("videos", "paths"):
+                if key in document:
+                    document = document[key]
+                    break
+        if not isinstance(document, list):
+            raise ValueError(
+                "JSON input manifest must be an array, or an object containing "
+                "a 'videos' or 'paths' array"
+            )
+        raw_entries = document
+    else:
+        raise ValueError("--input must be a .txt or .json video-path manifest")
+
+    videos: list[Path] = []
+    seen: set[Path] = set()
+    for index, entry in enumerate(raw_entries, start=1):
+        if isinstance(entry, dict):
+            entry = entry.get("path", entry.get("video_path"))
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(f"Invalid video path at manifest item {index}: {entry!r}")
+        candidate = Path(entry.strip()).expanduser()
+        if not candidate.is_absolute():
+            candidate = manifest.parent / candidate
+        candidate = candidate.resolve()
+        if candidate in seen:
+            raise ValueError(f"Duplicate video path in input manifest: {candidate}")
+        if not candidate.is_file():
+            raise FileNotFoundError(
+                f"Video listed at manifest item {index} does not exist: {candidate}"
+            )
+        if candidate.suffix.lower() not in normalized_extensions:
+            raise ValueError(
+                f"Unsupported video extension at manifest item {index}: {candidate}"
+            )
+        seen.add(candidate)
+        videos.append(candidate)
+    return videos
+
+
+def _task_name(video: Path) -> str:
+    """Return the stable absolute identity stored in manifests and checkpoints."""
+    return video.resolve().as_posix()
+
+
 def camera_json_path(video: Path) -> Path:
     """Place one camera JSON beside its source using the extension-free stem."""
     return video.parent / f"cam_{video.stem}.json"
@@ -97,13 +160,16 @@ def camera_artifact_dir(video: Path) -> Path:
     return video.parent / f"{video.name}.camera"
 
 
-def video_lease_path(input_root: Path, video: Path) -> Path:
-    """Return a run-independent lock path for one canonical output video."""
-    root = input_root.resolve()
-    canonical = video.resolve()
-    relative = camera_json_path(canonical).relative_to(root).as_posix()
-    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()[:32]
-    return root / ".camera_create_ckpt" / "video_leases" / f"{digest}.lease"
+def video_lease_path(video: Path) -> Path:
+    """Return a manifest-independent lease beside the source video's directory."""
+    output_identity = camera_json_path(video.resolve()).as_posix()
+    digest = hashlib.sha256(output_identity.encode("utf-8")).hexdigest()[:32]
+    return (
+        video.resolve().parent
+        / ".camera_create_ckpt"
+        / "video_leases"
+        / f"{digest}.lease"
+    )
 
 
 def validate_unique_camera_outputs(videos: list[Path]) -> None:
@@ -122,6 +188,23 @@ def validate_unique_camera_outputs(videos: list[Path]) -> None:
         raise ValueError(
             "Multiple videos would produce the same cam_<stem>.json output: " + detail
         )
+
+
+def validate_existing_output_owners(videos: list[Path]) -> None:
+    """Refuse to overwrite a camera JSON that identifies a different source video."""
+    for video in videos:
+        output = camera_json_path(video)
+        if not output.is_file():
+            continue
+        try:
+            data = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        owner = data.get("video_name") if isinstance(data, dict) else None
+        if isinstance(owner, str) and owner != video.name:
+            raise ValueError(
+                f"Output collision: {output} belongs to {owner}, not {video.name}"
+            )
 
 
 def valid_existing_output(
@@ -174,7 +257,7 @@ def _manifest_payload(
         "format_version": 1,
         "videos": [
             {
-                "relative_path": path.relative_to(options.input_root).as_posix(),
+                "path": _task_name(path),
                 "size": path.stat().st_size,
                 "mtime_ns": path.stat().st_mtime_ns,
             }
@@ -304,7 +387,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
     stable = {
         "videos": [
             {
-                "relative_path": path.relative_to(options.input_root).as_posix(),
+                "path": _task_name(path),
                 "size": path.stat().st_size,
                 "mtime_ns": path.stat().st_mtime_ns,
             }
@@ -354,7 +437,7 @@ def _worker_main(
     )
     if not worker_lease.acquire():
         for video in tasks:
-            relative = video.relative_to(options.input_root).as_posix()
+            relative = _task_name(video)
             progress_queue.put(
                 ("claimed_elsewhere", global_worker_id, relative, "")
             )
@@ -372,7 +455,7 @@ def _worker_main(
         "num_nodes": options.num_nodes,
         "gpu_id": gpu_id,
         "assigned_tasks": [
-            path.relative_to(options.input_root).as_posix() for path in tasks
+            _task_name(path) for path in tasks
         ],
         "tasks": {},
     }
@@ -386,7 +469,7 @@ def _worker_main(
     _atomic_checkpoint(checkpoint_path, state)
     for video in tasks:
         pending_output: Path | None = None
-        relative = video.relative_to(options.input_root).as_posix()
+        relative = _task_name(video)
         job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
         job_root = checkpoint_path.parent / "stage_cache" / (
             f"worker_{global_worker_id:03d}_{job_key}"
@@ -407,7 +490,7 @@ def _worker_main(
             progress_queue.put(("skipped", global_worker_id, relative, ""))
             continue
         lease = TaskLease(
-            video_lease_path(options.input_root, video),
+            video_lease_path(video),
             global_worker_id,
             options.lease_timeout_seconds,
         )
@@ -420,6 +503,17 @@ def _worker_main(
             progress_queue.put(
                 ("claimed_elsewhere", global_worker_id, relative, "")
             )
+            continue
+        try:
+            validate_existing_output_owners([video])
+        except ValueError as error:
+            state["tasks"][relative] = {
+                "status": "failed",
+                "error": str(error),
+            }
+            _atomic_checkpoint(checkpoint_path, state)
+            lease.release()
+            progress_queue.put(("failed", global_worker_id, relative, str(error)))
             continue
         if not options.overwrite and valid_existing_output(
             video,
@@ -509,7 +603,7 @@ def _worker_main(
 
 
 def run_batch(options: BatchOptions) -> dict[str, Any]:
-    """Scan, preassign, execute, resume, and summarize a multi-GPU video batch."""
+    """Load, preassign, execute, resume, and summarize one manifest shard."""
     if not options.gpu_ids:
         raise ValueError("At least one GPU id is required")
     if options.workers_per_gpu < 1:
@@ -523,8 +617,9 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     ):
         raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
     options.model_paths.validate_depth_models()
-    videos = discover_videos(options.input_root, options.extensions)
+    videos = load_video_manifest(options.input_manifest, options.extensions)
     validate_unique_camera_outputs(videos)
+    validate_existing_output_owners(videos)
     local_worker_count = len(options.gpu_ids) * options.workers_per_gpu
     expected_launcher_processes = options.num_nodes * len(options.gpu_ids)
     if (
@@ -576,7 +671,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         for video in videos
     )
     summary = {
-        "input_root": str(options.input_root),
+        "input_manifest": str(options.input_manifest),
         "videos_found": len(videos),
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,

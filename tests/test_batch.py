@@ -14,8 +14,10 @@ from camera_create.batch import (
     camera_artifact_dir,
     camera_json_path,
     discover_videos,
+    load_video_manifest,
     prepare_video,
     valid_existing_output,
+    validate_existing_output_owners,
     validate_unique_camera_outputs,
 )
 
@@ -36,6 +38,47 @@ def test_recursive_discovery_and_static_assignment(tmp_path: Path) -> None:
     assert camera_artifact_dir(second).parent == nested.resolve()
 
 
+def test_load_txt_and_json_video_manifests(tmp_path: Path) -> None:
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    first = videos / "a.mp4"
+    second = videos / "b.mkv"
+    first.touch()
+    second.touch()
+    text_manifest = tmp_path / "clip_1.txt"
+    text_manifest.write_text(
+        f"# shard one\nvideos/{first.name}\n{second.resolve()}\n", encoding="utf-8"
+    )
+    json_manifest = tmp_path / "clip_2.json"
+    json_manifest.write_text(
+        json.dumps({"videos": [{"path": str(first)}, str(second)]}),
+        encoding="utf-8",
+    )
+
+    expected = [first.resolve(), second.resolve()]
+    assert load_video_manifest(text_manifest, (".mp4", ".mkv")) == expected
+    assert load_video_manifest(json_manifest, (".mp4", ".mkv")) == expected
+
+
+def test_manifest_rejects_missing_duplicate_and_unsupported_paths(tmp_path: Path) -> None:
+    video = tmp_path / "a.mp4"
+    video.touch()
+    duplicate = tmp_path / "duplicate.txt"
+    duplicate.write_text(f"{video}\n{video}\n", encoding="utf-8")
+    missing = tmp_path / "missing.json"
+    missing.write_text(json.dumps(["absent.mp4"]), encoding="utf-8")
+    unsupported = tmp_path / "unsupported.txt"
+    unsupported.write_text(str(tmp_path / "notes.csv"), encoding="utf-8")
+    (tmp_path / "notes.csv").touch()
+
+    with pytest.raises(ValueError, match="Duplicate video path"):
+        load_video_manifest(duplicate, (".mp4",))
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        load_video_manifest(missing, (".mp4",))
+    with pytest.raises(ValueError, match="Unsupported video extension"):
+        load_video_manifest(unsupported, (".mp4",))
+
+
 def test_duplicate_stems_in_one_directory_are_rejected(tmp_path: Path) -> None:
     first = tmp_path / "same.mp4"
     second = tmp_path / "same.mkv"
@@ -44,6 +87,20 @@ def test_duplicate_stems_in_one_directory_are_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="same cam_<stem>.json"):
         validate_unique_camera_outputs([first, second])
+
+
+def test_existing_camera_json_cannot_be_reused_by_another_extension(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "same.mkv"
+    video.touch()
+    camera_json_path(video).write_text(
+        json.dumps({"format_version": 2, "video_name": "same.mp4"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="belongs to same.mp4"):
+        validate_existing_output_owners([video])
 
 
 def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:

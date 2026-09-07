@@ -3,24 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
 import os
-import shutil
 from pathlib import Path
 
-from .artifacts import export_camera_json_v2
 from .batch import (
     DEFAULT_VIDEO_EXTENSIONS,
     BatchOptions,
-    camera_artifact_dir,
-    camera_json_path,
-    prepare_video,
     run_batch,
 )
 from .config import ModelPaths
-from .pipeline import CameraCreatePipeline, PipelineOptions
+from .pipeline import PipelineOptions
 from .worker_runner import default_environment_executable
 
 
@@ -35,15 +29,6 @@ def _environment_int(name: str, default: int | None) -> int | None:
         raise ValueError(f"Environment variable {name} must be an integer: {value}") from error
 
 
-def _environment_run_id() -> str | None:
-    """Resolve an explicit or DLC-provided stable distributed run identifier."""
-    for name in ("CAMERA_CREATE_RUN_ID", "DLC_JOB_ID", "PAI_JOB_ID"):
-        value = os.environ.get(name)
-        if value and value.strip():
-            return value.strip()
-    return None
-
-
 def _environment_bool(name: str) -> bool:
     """Interpret a conventional boolean environment variable."""
     value = os.environ.get(name, "").strip().lower()
@@ -54,39 +39,21 @@ def _environment_bool(name: str) -> bool:
     raise ValueError(f"Environment variable {name} must be a boolean: {value}")
 
 
-def _distributed_environment_defaults() -> tuple[int, int]:
-    """Resolve machine topology from DLC or an Accelerate/torchrun child process."""
-    group_world_size = _environment_int("GROUP_WORLD_SIZE", None)
-    group_rank = _environment_int("GROUP_RANK", None)
-    if group_world_size is not None and group_rank is not None:
-        return group_world_size, group_rank
-
-    world_size = _environment_int("WORLD_SIZE", 1)
-    rank = _environment_int("RANK", 0)
-    local_world_size = _environment_int("LOCAL_WORLD_SIZE", None)
-    if local_world_size is None or local_world_size <= 1:
-        return world_size or 1, rank or 0
-    if world_size is None or rank is None or world_size % local_world_size:
-        raise ValueError(
-            "WORLD_SIZE must be divisible by LOCAL_WORLD_SIZE for a multi-process "
-            "DLC/Accelerate launch"
-        )
-    return world_size // local_world_size, rank // local_world_size
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI arguments without importing heavyweight model dependencies."""
-    environment_num_nodes, environment_node_rank = _distributed_environment_defaults()
     parser = argparse.ArgumentParser(
-        description="Estimate metric camera intrinsics/extrinsics from a video"
+        description="Estimate metric cameras for videos listed in a TXT/JSON shard"
     )
     parser.add_argument(
-        "--input", required=True, type=Path, help="Input video file or directory"
+        "--input",
+        required=True,
+        type=Path,
+        help="TXT or JSON file containing one shard of video paths",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        help="Deprecated; outputs are always written beside each source video",
+        help="Unsupported compatibility option; outputs stay beside each source video",
     )
     parser.add_argument("--ckpt-root", type=Path, help="Default: camera_create/ckpt")
     parser.add_argument("--pi3x-ckpt", type=Path, help="Override Pi3X checkpoint path")
@@ -106,12 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--work-dir",
         type=Path,
-        help="Legacy explicit scratch/resume directory for a single video",
+        help="Unsupported legacy single-video option",
     )
     parser.add_argument(
         "--stage-cache-dir",
         type=Path,
-        help="Single-video stage resume directory; default: OUTPUT/.camera_create_ckpt",
+        help="Unsupported legacy single-video option; use --checkpoint-dir",
     )
     parser.add_argument(
         "--keep-stage-cache",
@@ -121,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-work",
         action="store_true",
-        help="Copy intermediate cache/VIPE data into output/work",
+        help="Unsupported legacy single-video option",
     )
     parser.add_argument(
         "--pi3x-python",
@@ -179,8 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--machine_rank",
         dest="node_rank",
         type=int,
-        default=environment_node_rank,
-        help="Batch node index; inferred from DLC or Accelerate launcher variables",
+        default=0,
+        help="Optional explicit node index; defaults to single-machine rank 0",
     )
     parser.add_argument(
         "--num-nodes",
@@ -188,13 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--num_machines",
         dest="num_nodes",
         type=int,
-        default=environment_num_nodes,
-        help="Total homogeneous machines; inferred from DLC or Accelerate variables",
+        default=1,
+        help="Optional explicit machine count; defaults to one independent machine",
     )
     parser.add_argument(
         "--run-id",
-        default=_environment_run_id(),
-        help="Shared immutable run namespace; required for multi-node batch mode",
+        help="Checkpoint run namespace; generated from this shard when omitted",
     )
     parser.add_argument(
         "--num-processes",
@@ -235,12 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--video-extensions",
         default=",".join(DEFAULT_VIDEO_EXTENSIONS),
-        help="Comma-separated extensions recursively discovered in batch mode",
+        help="Comma-separated video extensions accepted in the input manifest",
     )
     parser.add_argument(
         "--checkpoint-dir",
         type=Path,
-        help="Batch checkpoint root; default: INPUT/.camera_create_ckpt",
+        help="Checkpoint root; default: MANIFEST_DIR/.camera_create_ckpt/MANIFEST_STEM",
     )
     parser.add_argument(
         "--overwrite",
@@ -297,118 +263,51 @@ def main(argv: list[str] | None = None) -> int:
         disable_sdp=args.disable_sdp,
     )
     input_path = args.input.resolve()
-    if input_path.is_dir():
-        local_rank = _environment_int("LOCAL_RANK", None)
-        if local_rank not in (None, 0):
-            print(
-                json.dumps(
-                    {
-                        "status": "idle_launcher_process",
-                        "local_rank": local_rank,
-                        "reason": (
-                            "LOCAL_RANK=0 owns this machine's camera_create workers"
-                        ),
-                    },
-                    indent=2,
-                )
-            )
-            return 0
-        if args.output is not None:
-            raise ValueError("--output must be omitted in directory batch mode")
-        if args.work_dir is not None or args.stage_cache_dir is not None or args.keep_work:
-            raise ValueError(
-                "--work-dir/--stage-cache-dir/--keep-work are single-video options"
-            )
-        extensions = tuple(
-            item.strip().lower()
-            for item in args.video_extensions.split(",")
-            if item.strip()
-        )
-        checkpoint_root = (
-            args.checkpoint_dir.resolve()
-            if args.checkpoint_dir
-            else input_path / ".camera_create_ckpt"
-        )
-        report = run_batch(
-            BatchOptions(
-                input_root=input_path,
-                checkpoint_root=checkpoint_root,
-                model_paths=models,
-                pipeline_options=options,
-                gpu_ids=_parse_gpu_ids(args.gpu_ids),
-                workers_per_gpu=args.workers_per_gpu,
-                node_rank=args.node_rank,
-                num_nodes=args.num_nodes,
-                run_id=args.run_id,
-                launcher_num_processes=args.launcher_num_processes,
-                main_process_ip=args.main_process_ip,
-                main_process_port=args.main_process_port,
-                lease_timeout_seconds=args.lease_timeout_seconds,
-                target_fps=args.target_fps,
-                max_frames=args.max_frames,
-                max_video_seconds=args.max_video_seconds,
-                extensions=extensions,
-                ffmpeg_command=args.ffmpeg_command,
-                overwrite=args.overwrite,
-                keep_stage_cache=args.keep_stage_cache,
-            )
-        )
-        print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 1 if any(
-            report[name] for name in ("failed", "worker_crashes", "claimed_elsewhere")
-        ) else 0
     if not input_path.is_file():
-        raise FileNotFoundError(f"Input does not exist: {input_path}")
-    if args.target_fps <= 0 or args.max_frames <= 0 or args.max_video_seconds <= 0:
-        raise ValueError(
-            "--target-fps, --max-frames and --max-video-seconds must be positive"
-        )
+        raise FileNotFoundError(f"Input manifest does not exist: {input_path}")
+    if input_path.suffix.lower() not in {".txt", ".json"}:
+        raise ValueError("--input must be a .txt or .json video-path manifest")
     if args.output is not None:
-        logging.getLogger(__name__).warning(
-            "--output is deprecated and ignored; outputs are written beside %s",
-            input_path,
+        raise ValueError("--output is unsupported; outputs are written beside each video")
+    if args.work_dir is not None or args.stage_cache_dir is not None or args.keep_work:
+        raise ValueError(
+            "--work-dir/--stage-cache-dir/--keep-work are unavailable in manifest mode"
         )
-    if args.work_dir is not None and args.stage_cache_dir is not None:
-        raise ValueError("--work-dir and --stage-cache-dir are mutually exclusive")
-    output_dir = camera_artifact_dir(input_path)
-    explicit_cache = args.work_dir is not None or args.stage_cache_dir is not None
-    single_key = hashlib.sha256(str(input_path).encode()).hexdigest()[:16]
-    stage_cache = (
-        args.work_dir
-        or args.stage_cache_dir
-        or input_path.parent / ".camera_create_ckpt" / f"single_{single_key}"
-    ).resolve()
-    normalized, source_fps, applied_seconds = prepare_video(
-        input_path,
-        stage_cache,
-        args.target_fps,
-        args.max_frames,
-        args.max_video_seconds,
-        args.ffmpeg_command,
+    extensions = tuple(
+        item.strip().lower()
+        for item in args.video_extensions.split(",")
+        if item.strip()
     )
-    report = CameraCreatePipeline(models, options).run(
-        normalized, output_dir, stage_cache / "pipeline"
+    checkpoint_root = (
+        args.checkpoint_dir.resolve()
+        if args.checkpoint_dir
+        else input_path.parent / ".camera_create_ckpt" / input_path.stem
     )
-    payload = export_camera_json_v2(
-        output_dir,
-        camera_json_path(input_path),
-        input_path.name,
-        source_fps,
-        args.target_fps,
-        args.max_frames,
-        applied_seconds,
-    )
-    if not explicit_cache and not args.keep_stage_cache:
-        shutil.rmtree(stage_cache, ignore_errors=True)
-    print(
-        json.dumps(
-            {
-                "camera_json": str(camera_json_path(input_path)),
-                "artifact_dir": str(output_dir),
-                "frame_count": payload["frame_count"],
-                "validation": report,
-            },
-            indent=2,
+    report = run_batch(
+        BatchOptions(
+            input_manifest=input_path,
+            checkpoint_root=checkpoint_root,
+            model_paths=models,
+            pipeline_options=options,
+            gpu_ids=_parse_gpu_ids(args.gpu_ids),
+            workers_per_gpu=args.workers_per_gpu,
+            node_rank=args.node_rank,
+            num_nodes=args.num_nodes,
+            run_id=args.run_id,
+            launcher_num_processes=args.launcher_num_processes,
+            main_process_ip=args.main_process_ip,
+            main_process_port=args.main_process_port,
+            lease_timeout_seconds=args.lease_timeout_seconds,
+            target_fps=args.target_fps,
+            max_frames=args.max_frames,
+            max_video_seconds=args.max_video_seconds,
+            extensions=extensions,
+            ffmpeg_command=args.ffmpeg_command,
+            overwrite=args.overwrite,
+            keep_stage_cache=args.keep_stage_cache,
         )
     )
-    return 0
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 1 if any(
+        report[name] for name in ("failed", "worker_crashes", "claimed_elsewhere")
+    ) else 0

@@ -437,7 +437,7 @@ source .envs/vipe/bin/activate
 
 ```bash
 .envs/pi3x/bin/python cli.py \
-  --input /data/input.mp4 \
+  --input /data/shards/clip_1.txt \
   --target-fps 24 \
   --max-frames 241 \
   --max-video-seconds 10.06 \

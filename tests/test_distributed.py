@@ -84,14 +84,13 @@ def test_task_lease_is_exclusive_and_releasable(tmp_path: Path) -> None:
 
 
 def test_video_lease_is_independent_of_run_namespace(tmp_path: Path) -> None:
-    input_root = tmp_path / "input"
-    video = input_root / "nested" / "video.mp4"
+    video = tmp_path / "input" / "nested" / "video.mp4"
     video.parent.mkdir(parents=True)
     video.touch()
 
-    expected = video_lease_path(input_root, video)
+    expected = video_lease_path(video)
 
-    assert expected.parent == input_root / ".camera_create_ckpt" / "video_leases"
+    assert expected.parent == video.parent / ".camera_create_ckpt" / "video_leases"
     assert "run_" not in str(expected)
 
 
@@ -117,17 +116,17 @@ def test_task_lease_recovers_expired_owner(tmp_path: Path) -> None:
 
 
 def test_empty_multinode_run_writes_isolated_node_summaries(tmp_path: Path) -> None:
-    input_root = tmp_path / "input"
+    input_manifest = tmp_path / "empty.json"
     checkpoint_root = tmp_path / "checkpoints"
     pi3x = tmp_path / "models" / "pi3x"
     moge3 = tmp_path / "models" / "moge3"
     vipe = tmp_path / "models" / "vipe"
-    input_root.mkdir()
+    input_manifest.write_text("[]", encoding="utf-8")
     for model in (pi3x, moge3, vipe):
         model.mkdir(parents=True)
         (model / "placeholder").touch()
     options = BatchOptions(
-        input_root=input_root,
+        input_manifest=input_manifest,
         checkpoint_root=checkpoint_root,
         model_paths=ModelPaths(pi3x, moge3, vipe),
         pipeline_options=PipelineOptions(),
@@ -150,7 +149,9 @@ def test_empty_multinode_run_writes_isolated_node_summaries(tmp_path: Path) -> N
     assert not (run_root / "summary.json").exists()
 
 
-def test_dlc_environment_and_accelerate_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_manifest_mode_ignores_dlc_environment_but_accepts_explicit_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("WORLD_SIZE", "8")
     monkeypatch.setenv("RANK", "3")
     monkeypatch.setenv("MASTER_ADDR", "10.0.0.1")
@@ -175,11 +176,11 @@ def test_dlc_environment_and_accelerate_aliases(monkeypatch: pytest.MonkeyPatch)
         ]
     )
 
-    assert defaults.num_nodes == 8
-    assert defaults.node_rank == 3
+    assert defaults.num_nodes == 1
+    assert defaults.node_rank == 0
     assert defaults.main_process_ip == "10.0.0.1"
     assert defaults.main_process_port == 29500
-    assert defaults.run_id == "dlc-camera-job"
+    assert defaults.run_id is None
     assert aliases.num_nodes == 8
     assert aliases.node_rank == 4
     assert aliases.launcher_num_processes == 64
@@ -187,7 +188,7 @@ def test_dlc_environment_and_accelerate_aliases(monkeypatch: pytest.MonkeyPatch)
     assert aliases.main_process_port == 29600
 
 
-def test_accelerate_process_environment_is_reduced_to_machine_topology(
+def test_launcher_process_environment_does_not_reshard_an_input_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WORLD_SIZE", "64")
@@ -197,17 +198,17 @@ def test_accelerate_process_environment_is_reduced_to_machine_topology(
 
     args = build_parser().parse_args(["--input", "/shared/videos"])
 
-    assert args.num_nodes == 8
-    assert args.node_rank == 3
+    assert args.num_nodes == 1
+    assert args.node_rank == 0
 
 
-def test_nonzero_local_launcher_rank_exits_without_starting_workers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_input_must_be_a_manifest_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("WORLD_SIZE", "64")
     monkeypatch.setenv("RANK", "1")
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
     monkeypatch.setenv("LOCAL_RANK", "1")
 
-    assert main(["--input", str(tmp_path)]) == 0
-    assert '"status": "idle_launcher_process"' in capsys.readouterr().out
+    with pytest.raises(FileNotFoundError, match="Input manifest"):
+        main(["--input", str(tmp_path)])
