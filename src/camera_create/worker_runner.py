@@ -296,7 +296,7 @@ def run_moge3_worker(
     output: Path,
     device: str,
     max_side: int,
-    fov_x_deg: float,
+    fov_x_deg: float | None,
     refine_steps: int,
     use_fp16: bool,
     disable_cudnn: bool = False,
@@ -321,9 +321,10 @@ def run_moge3_worker(
     args = [
         str(executable), str(script), "--input", str(video), "--output", str(output),
         "--checkpoint", str(checkpoint), "--device", device,
-        "--max-inference-side", str(max_side), "--fov-x-deg", str(fov_x_deg),
-        "--refine-steps", str(refine_steps),
+        "--max-inference-side", str(max_side), "--refine-steps", str(refine_steps),
     ]
+    if fov_x_deg is not None:
+        args.extend(["--fov-x-deg", str(fov_x_deg)])
     if use_fp16:
         args.append("--fp16")
     if disable_cudnn:

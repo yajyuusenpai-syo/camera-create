@@ -10,12 +10,7 @@ from pathlib import Path
 
 from .artifacts import export_camera_artifacts
 from .config import ModelPaths
-from .depth import (
-    default_fov_x,
-    fuse_metric_depths,
-    load_depth_cache,
-    save_depth_cache,
-)
+from .depth import fuse_metric_depths, load_depth_cache, save_depth_cache
 from .stage_cache import StageCache, fingerprint, video_identity
 from .vipe_runner import (
     preflight_vipe_assets,
@@ -98,6 +93,7 @@ class CameraCreatePipeline:
             "ema_momentum": self.options.ema_momentum,
             "max_inference_side": self.options.max_inference_side,
             "fov_x_deg": self.options.fov_x_deg,
+            "moge3_fov_policy": "model_estimated_when_unspecified_v2",
             "moge3_refine_steps": self.options.moge3_refine_steps,
             "moge3_fp16": self.options.moge3_fp16,
             "disable_cudnn": self.options.disable_cudnn,
@@ -138,9 +134,9 @@ class CameraCreatePipeline:
                     self.options.pi3x_service,
                 )
                 stage_cache.completed("pi3x")
-            fov_x = self.options.fov_x_deg or default_fov_x(
-                pi3x_result.original_width
-            )
+            # Unknown FoV must remain unknown: MoGe-3 can infer it from the point
+            # map, while forcing the former 60-degree fallback biases geometry.
+            fov_x = self.options.fov_x_deg
             try:
                 moge3_result = load_worker_cache(moge3_cache, "MoGe-3")
                 LOG.info("[resume] Reusing MoGe-3 depth: %s", moge3_cache)
@@ -212,12 +208,14 @@ class CameraCreatePipeline:
                 "depth_inference_width": pi3x_result.inference_width,
                 "depth_inference_height": pi3x_result.inference_height,
                 "fov_x_deg_for_moge3": fov_x,
+                "moge3_fov_source": "user" if fov_x is not None else "model_estimated",
                 "moge3_refine_steps": self.options.moge3_refine_steps,
                 "disable_cudnn": self.options.disable_cudnn,
                 "disable_sdp": self.options.disable_sdp,
                 "translation_unit": "metre",
                 "pose_convention": "OpenCV c2w and w2c; +x right, +y down, +z forward",
                 "metric_basis": "MoGe-3 metric depth fused into Pi3X temporal depth and injected into VIPE BA",
+                "metric_scale_validated_against_ground_truth": False,
             }
             report = export_camera_artifacts(
                 video, vipe_dir, output_dir, pi3x_result.frame_count, scale, metadata

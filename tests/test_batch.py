@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from camera_create.artifacts import export_camera_json_v2
+from camera_create.artifacts import export_camera_json_v2, normalize_intrinsics_k
 from camera_create.batch import (
     BatchOptions,
     _start_depth_service_group,
@@ -177,7 +177,8 @@ def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:
     np.save(result / "poses_c2w_metric.npy", poses)
     np.save(result / "intrinsics_K.npy", intrinsics)
     (result / "camera_report.json").write_text(
-        json.dumps({"valid": True}), encoding="utf-8"
+        json.dumps({"valid": True, "original_width": 1000, "original_height": 700}),
+        encoding="utf-8",
     )
     video = tmp_path / "clip.mp4"
     video.touch()
@@ -191,11 +192,25 @@ def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:
     assert payload["frames"][1]["timestamp_seconds"] == 1 / 24
     assert payload["frames"][1]["c2w"][0][3] == 1.25
     assert payload["frames"][0]["intrinsics"][0][0] == 500
+    assert payload["frames"][0]["intrinsics_normalized"][0][0] == 0.5
+    assert payload["frames"][0]["intrinsics_normalized"][1][1] == pytest.approx(0.7)
+    assert payload["metric_scale_validated_against_ground_truth"] is False
     assert valid_existing_output(video)
     assert valid_existing_output(video, max_frames=241)
     assert not valid_existing_output(video, max_frames=120)
     assert not valid_existing_output(video, target_fps=30.0)
     assert not valid_existing_output(video, max_video_seconds=5.0)
+
+
+def test_normalized_intrinsics_are_resolution_independent() -> None:
+    first = np.array([[[1000.0, 0.0, 640.0], [0.0, 900.0, 360.0], [0, 0, 1]]])
+    second = first.copy()
+    second[:, 0, :] *= 0.5
+    second[:, 1, :] *= 0.5
+    assert np.allclose(
+        normalize_intrinsics_k(first, 1280, 720),
+        normalize_intrinsics_k(second, 640, 360),
+    )
 
 
 def test_prepare_video_applies_fps_frame_and_duration_limits(

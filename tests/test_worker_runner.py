@@ -11,6 +11,7 @@ from camera_create.worker_runner import (
     _require_executable,
     ensure_matching_workers,
     load_worker_cache,
+    run_moge3_worker,
     run_pi3x_worker,
 )
 
@@ -115,6 +116,35 @@ def test_pi3x_worker_can_use_persistent_service(
 
     assert requests[0]["command"] == "infer"
     assert result.frame_count == 2
+
+
+def test_moge3_worker_omits_unknown_fov(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "moge-python"
+    executable.touch()
+    output = tmp_path / "result.npz"
+    invoked: list[str] = []
+
+    def fake_run(args: list[str], check: bool, env: dict[str, str]) -> None:
+        assert check
+        invoked.extend(args)
+        write_cache(output)
+
+    monkeypatch.setattr("camera_create.worker_runner.subprocess.run", fake_run)
+    run_moge3_worker(
+        executable,
+        tmp_path / "input.mp4",
+        tmp_path / "ckpt",
+        output,
+        "cuda:0",
+        560,
+        None,
+        3,
+        True,
+    )
+
+    assert "--fov-x-deg" not in invoked
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX venv Python uses symlinks")

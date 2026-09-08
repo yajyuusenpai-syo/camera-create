@@ -29,7 +29,11 @@ def load_moge3(checkpoint: Path, device: str):
 
 
 def infer_to_cache(
-    args: argparse.Namespace, model, input_path: Path, output: Path, fov_x_deg: float
+    args: argparse.Namespace,
+    model,
+    input_path: Path,
+    output: Path,
+    fov_x_deg: float | None,
 ) -> None:
     """Infer one video with an already-loaded MoGe-3 model and publish its cache."""
     video = read_video(input_path, args.max_inference_side)
@@ -39,13 +43,17 @@ def infer_to_cache(
             image = torch.from_numpy(frame).permute(2, 0, 1).to(
                 device=args.device, dtype=torch.float32
             ).div_(255.0)
-            result = model.infer(
-                image,
-                fov_x=fov_x_deg,
-                refine_steps=args.refine_steps,
-                use_fp16=args.fp16,
-            )
+            infer_options = {
+                "refine_steps": args.refine_steps,
+                "use_fp16": args.fp16,
+            }
+            if fov_x_deg is not None:
+                infer_options["fov_x"] = fov_x_deg
+            result = model.infer(image, **infer_options)
             depth = result["depth"].float()
+            mask = result.get("mask")
+            if mask is not None:
+                depth = torch.where(mask.bool(), depth, torch.nan)
             if tuple(depth.shape[-2:]) != tuple(frame.shape[:2]):
                 depth = torch.nn.functional.interpolate(
                     depth[None, None],
@@ -100,7 +108,7 @@ def serve(args: argparse.Namespace, model) -> int:
                     model,
                     Path(request["input"]),
                     Path(request["output"]),
-                    float(request["fov_x_deg"]),
+                    request.get("fov_x_deg"),
                 )
                 connection.send({"ok": True})
             except Exception as error:  # noqa: BLE001 - isolate one request
@@ -132,7 +140,7 @@ def main() -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max-inference-side", type=int, default=560)
-    parser.add_argument("--fov-x-deg", type=float, default=60.0)
+    parser.add_argument("--fov-x-deg", type=float)
     parser.add_argument("--refine-steps", type=int, default=3)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--disable-cudnn", action="store_true")

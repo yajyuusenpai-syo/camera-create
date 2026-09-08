@@ -17,8 +17,16 @@
 | `extrinsics_w2c_metric.npy` | `(T,4,4)` | 上述矩阵的逆，传统 world-to-camera extrinsics |
 | `intrinsics.npy` | `(T,1,4)` | `[fx,fy,cx,cy]`，像素单位 |
 | `intrinsics_K.npy` | `(T,3,3)` | 3×3 内参矩阵，像素单位 |
+| `intrinsics_normalized.npy` | `(T,1,4)` | 分辨率无关的 `[fx/W,fy/H,cx/W,cy/H]` |
+| `intrinsics_normalized_K.npy` | `(T,3,3)` | 上述归一化内参的3×3矩阵形式 |
 | `scale_per_frame.npy` | `(T,)` | Pi3X 深度到 MoGe-3 米制深度的 EMA 尺度 |
 | `camera_report.json` | JSON | 坐标约定、视频信息和数值验证结果 |
 
 坐标采用 OpenCV 约定：相机局部坐标 `+x` 向右、`+y` 向下、`+z` 向前。
-`intrinsics` 不是“米制”量；它以像素表达。Metric 指深度和外参平移的单位为米。
+JSON逐帧同时保留像素单位的 `intrinsics` 和分辨率无关的
+`intrinsics_normalized`。归一化规则是K矩阵第0行除以图像宽度W、第1行除以图像
+高度H，最后一行保持 `[0,0,1]`。
+
+`intrinsics` 不是“米制”量；它以像素表达。`is_metric: true` 表示外参平移继承
+MoGe-3单目metric深度并以米为目标单位，但不是传感器或GT尺度认证。JSON同时写入
+`metric_scale_provenance` 和 `metric_scale_validated_against_ground_truth: false`。

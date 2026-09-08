@@ -78,6 +78,19 @@ def intrinsics_to_k(intrinsics: np.ndarray) -> np.ndarray:
     return matrices
 
 
+def normalize_intrinsics_k(
+    intrinsics: np.ndarray, image_width: int, image_height: int
+) -> np.ndarray:
+    """Convert pixel K matrices to resolution-independent [0, 1] coordinates."""
+    if image_width <= 0 or image_height <= 0:
+        raise ValueError("image_width and image_height must be positive")
+    normalized = np.asarray(intrinsics, dtype=np.float32).copy()
+    normalized[:, 0, :] /= float(image_width)
+    normalized[:, 1, :] /= float(image_height)
+    normalized[:, 2, :] = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    return normalized
+
+
 def _load_vipe_npz(
     video: Path, vipe_dir: Path, category: str
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -141,11 +154,27 @@ def export_camera_artifacts(
     )
     poses_w2c = np.linalg.inv(poses_c2w).astype(np.float32)
     k_matrices = intrinsics_to_k(intrinsics)
+    normalized_k = normalize_intrinsics_k(
+        k_matrices,
+        int(metadata["original_width"]),
+        int(metadata["original_height"]),
+    )
+    normalized_flat = np.stack(
+        (
+            normalized_k[:, 0, 0],
+            normalized_k[:, 1, 1],
+            normalized_k[:, 0, 2],
+            normalized_k[:, 1, 2],
+        ),
+        axis=1,
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     np.save(output_dir / "poses_c2w_metric.npy", poses_c2w)
     np.save(output_dir / "extrinsics_w2c_metric.npy", poses_w2c)
     np.save(output_dir / "intrinsics.npy", intrinsics[:, None, :])
     np.save(output_dir / "intrinsics_K.npy", k_matrices)
+    np.save(output_dir / "intrinsics_normalized.npy", normalized_flat[:, None, :])
+    np.save(output_dir / "intrinsics_normalized_K.npy", normalized_k)
     np.save(output_dir / "scale_per_frame.npy", scale_history.astype(np.float32))
     report = validate_camera(poses_c2w, intrinsics, scale_history)
     report.update(metadata)
@@ -186,12 +215,18 @@ def export_camera_json_v2(
         raise ValueError(
             f"Camera frame count {len(poses)} exceeds max_frames={max_frames}"
         )
+    validation: dict = {}
     if report_path.is_file():
         validation = json.loads(report_path.read_text(encoding="utf-8"))
         if not validation.get("valid", False):
             raise RuntimeError(
                 f"Refusing to export invalid camera result: {report_path}"
             )
+    image_width = int(validation.get("original_width", 0))
+    image_height = int(validation.get("original_height", 0))
+    normalized_intrinsics = normalize_intrinsics_k(
+        intrinsics, image_width, image_height
+    )
     payload = {
         "format_version": 2,
         "video_name": video_name,
@@ -201,14 +236,25 @@ def export_camera_json_v2(
         "frame_count": len(poses),
         "max_frames": int(max_frames),
         "is_metric": True,
+        "metric_scale_provenance": "MoGe-3 monocular metric estimate injected into VIPE BA",
+        "metric_scale_validated_against_ground_truth": False,
         "max_video_seconds": float(max_video_seconds),
+        "image_width": image_width,
+        "image_height": image_height,
         "camera_convention": "OpenCV: +X right, +Y down, +Z forward",
+        "intrinsics_convention": "pixel coordinates for image_width/image_height",
+        "intrinsics_normalized_convention": (
+            "fx,cx divided by image_width; fy,cy divided by image_height"
+        ),
         "frames": [
             {
                 "frame_index": index,
                 "timestamp_seconds": index / float(target_fps),
                 "c2w": poses[index].astype(float).tolist(),
                 "intrinsics": intrinsics[index].astype(float).tolist(),
+                "intrinsics_normalized": (
+                    normalized_intrinsics[index].astype(float).tolist()
+                ),
             }
             for index in range(len(poses))
         ],
