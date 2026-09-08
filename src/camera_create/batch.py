@@ -556,6 +556,68 @@ def _write_batch_summary(
         _atomic_checkpoint(run_root / "summary.json", result)
 
 
+def _write_failure_report(
+    input_manifest: Path,
+    run_root: Path,
+    run_id: str,
+    node_rank: int,
+    num_nodes: int,
+    worker_crashes: int,
+) -> Path:
+    """Collect full per-video tracebacks into a report beside the input shard."""
+    failures: list[dict[str, Any]] = []
+    for checkpoint in sorted(run_root.glob("worker_*.json")):
+        try:
+            worker = json.loads(checkpoint.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for video_path, state in worker.get("tasks", {}).items():
+            if not isinstance(state, dict) or state.get("status") != "failed":
+                continue
+            completed = list(state.get("completed_stages", []))
+            if not completed:
+                likely_stage = "video_preparation_or_pi3x"
+            elif completed[-1] == "pi3x":
+                likely_stage = "moge3"
+            elif completed[-1] == "moge3":
+                likely_stage = "metric_depth_fusion"
+            elif completed[-1] == "metric_depth":
+                likely_stage = "vipe"
+            else:
+                likely_stage = "camera_export"
+            failures.append(
+                {
+                    "video_path": video_path,
+                    "worker_id": worker.get("global_worker_id", worker.get("worker_id")),
+                    "gpu_id": worker.get("gpu_id"),
+                    "likely_failed_stage": likely_stage,
+                    "completed_stages": completed,
+                    "stage_cache": state.get("stage_cache"),
+                    "error": state.get("error", "<missing traceback>"),
+                    "worker_checkpoint": str(checkpoint),
+                }
+            )
+    failures.sort(key=lambda item: item["video_path"])
+    node_suffix = "" if num_nodes == 1 else f".node_{node_rank:03d}"
+    report_path = input_manifest.with_name(
+        f"{input_manifest.stem}.camera_create_failures{node_suffix}.json"
+    )
+    _atomic_checkpoint(
+        report_path,
+        {
+            "format_version": 1,
+            "input_manifest": str(input_manifest),
+            "run_id": run_id,
+            "node_rank": node_rank,
+            "num_nodes": num_nodes,
+            "failed_count": len(failures),
+            "worker_crashes": worker_crashes,
+            "failures": failures,
+        },
+    )
+    return report_path
+
+
 def _run_key(videos: list[Path], options: BatchOptions) -> str:
     stable = {
         "videos": [
@@ -573,6 +635,7 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
+        "vipe_height": options.vipe_height,
         "pi3x_chunk": options.pipeline_options.pi3x_chunk,
         "pi3x_stride": options.pipeline_options.pi3x_stride,
         "max_inference_side": options.pipeline_options.max_inference_side,
@@ -1054,7 +1117,20 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         process.join()
         if process.exitcode != 0:
             crashed += 1
-    result = {**summary, **counts, "worker_crashes": crashed}
+    failure_report = _write_failure_report(
+        options.input_manifest,
+        run_root,
+        run_token,
+        options.node_rank,
+        options.num_nodes,
+        crashed,
+    )
+    result = {
+        **summary,
+        **counts,
+        "worker_crashes": crashed,
+        "failure_report": str(failure_report),
+    }
     _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
     if service_root is not None:
         stop_depth_services()

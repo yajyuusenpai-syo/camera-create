@@ -14,6 +14,7 @@ from camera_create.artifacts import export_camera_json_v2, normalize_intrinsics_
 from camera_create.batch import (
     BatchOptions,
     _start_depth_service_group,
+    _write_failure_report,
     assign_tasks,
     camera_artifact_dir,
     camera_json_path,
@@ -44,6 +45,40 @@ def test_recursive_discovery_and_static_assignment(tmp_path: Path) -> None:
     assert camera_json_path(first).name == "cam_a.json"
     assert camera_artifact_dir(first).name == "a.MP4.camera"
     assert camera_artifact_dir(second).parent == nested.resolve()
+
+
+def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:
+    manifest = tmp_path / "clip_1.txt"
+    manifest.touch()
+    run_root = tmp_path / "state" / "run_abc"
+    run_root.mkdir(parents=True)
+    failed_video = tmp_path / "bad.mp4"
+    (run_root / "worker_003.json").write_text(
+        json.dumps(
+            {
+                "global_worker_id": 3,
+                "gpu_id": 1,
+                "tasks": {
+                    str(failed_video): {
+                        "status": "failed",
+                        "completed_stages": ["pi3x", "moge3", "metric_depth"],
+                        "stage_cache": "/cache/bad",
+                        "error": "Traceback\nRuntimeError: VIPE failed",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report_path = _write_failure_report(manifest, run_root, "abc", 0, 1, 0)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert report_path == tmp_path / "clip_1.camera_create_failures.json"
+    assert report["failed_count"] == 1
+    assert report["failures"][0]["video_path"] == str(failed_video)
+    assert report["failures"][0]["likely_failed_stage"] == "vipe"
+    assert "RuntimeError: VIPE failed" in report["failures"][0]["error"]
 
 
 def test_load_txt_and_json_video_manifests(tmp_path: Path) -> None:

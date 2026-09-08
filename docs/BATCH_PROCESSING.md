@@ -106,6 +106,16 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 逐帧 `c2w` 和像素单位 `intrinsics`。同一目录下若同时存在 `a.mp4` 和 `a.mkv`，
 二者都会映射到 `cam_a.json`，因此同一清单内会在推理前拒绝该冲突。
 
+每轮结束时还会在输入分片旁写入失败诊断报告，例如：
+
+```text
+/data/shards/clip_1.txt
+/data/shards/clip_1.camera_create_failures.json
+```
+
+报告包含失败视频路径、worker/GPU、完整 traceback、已完成阶段和保留的stage cache
+路径。即使没有失败也会生成报告，并写入 `failed_count: 0`，便于批量核查。
+
 ## Checkpoint与防重复
 
 默认checkpoint位置由清单名隔离：
