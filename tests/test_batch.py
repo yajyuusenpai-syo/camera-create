@@ -71,14 +71,30 @@ def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    report_path = _write_failure_report(manifest, run_root, "abc", 0, 1, 0)
+    report_path, failed_manifest = _write_failure_report(
+        manifest, run_root, "abc", 0, 1, 0
+    )
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
     assert report_path == tmp_path / "clip_1.camera_create_failures.json"
+    assert failed_manifest == tmp_path / "clip_1.camera_create_failed.txt"
+    assert failed_manifest.read_text(encoding="utf-8") == f"{failed_video}\n"
     assert report["failed_count"] == 1
     assert report["failures"][0]["video_path"] == str(failed_video)
     assert report["failures"][0]["likely_failed_stage"] == "vipe"
     assert "RuntimeError: VIPE failed" in report["failures"][0]["error"]
+
+
+def test_empty_failed_manifest_is_still_created(tmp_path: Path) -> None:
+    manifest = tmp_path / "clip_2.txt"
+    manifest.touch()
+    run_root = tmp_path / "run_empty"
+    run_root.mkdir()
+
+    _, failed_manifest = _write_failure_report(manifest, run_root, "empty", 0, 1, 0)
+
+    assert failed_manifest.is_file()
+    assert failed_manifest.read_text(encoding="utf-8") == ""
 
 
 def test_load_txt_and_json_video_manifests(tmp_path: Path) -> None:

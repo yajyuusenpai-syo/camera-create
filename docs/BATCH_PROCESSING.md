@@ -111,10 +111,13 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 ```text
 /data/shards/clip_1.txt
 /data/shards/clip_1.camera_create_failures.json
+/data/shards/clip_1.camera_create_failed.txt
 ```
 
 报告包含失败视频路径、worker/GPU、完整 traceback、已完成阶段和保留的stage cache
-路径。即使没有失败也会生成报告，并写入 `failed_count: 0`，便于批量核查。
+路径。`camera_create_failed.txt` 与输入TXT格式一致，每行一个失败视频的绝对路径，
+可以直接再次传给 `--input`。即使没有失败也会生成空TXT和诊断报告，并写入
+`failed_count: 0`，便于批量核查。
 
 ## Checkpoint与防重复
 

@@ -563,7 +563,7 @@ def _write_failure_report(
     node_rank: int,
     num_nodes: int,
     worker_crashes: int,
-) -> Path:
+) -> tuple[Path, Path]:
     """Collect full per-video tracebacks into a report beside the input shard."""
     failures: list[dict[str, Any]] = []
     for checkpoint in sorted(run_root.glob("worker_*.json")):
@@ -602,6 +602,9 @@ def _write_failure_report(
     report_path = input_manifest.with_name(
         f"{input_manifest.stem}.camera_create_failures{node_suffix}.json"
     )
+    failed_manifest_path = input_manifest.with_name(
+        f"{input_manifest.stem}.camera_create_failed{node_suffix}.txt"
+    )
     _atomic_checkpoint(
         report_path,
         {
@@ -615,7 +618,13 @@ def _write_failure_report(
             "failures": failures,
         },
     )
-    return report_path
+    temporary_manifest = failed_manifest_path.with_suffix(
+        failed_manifest_path.suffix + ".tmp"
+    )
+    failed_lines = "".join(f"{item['video_path']}\n" for item in failures)
+    temporary_manifest.write_text(failed_lines, encoding="utf-8")
+    temporary_manifest.replace(failed_manifest_path)
+    return report_path, failed_manifest_path
 
 
 def _run_key(videos: list[Path], options: BatchOptions) -> str:
@@ -1117,7 +1126,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         process.join()
         if process.exitcode != 0:
             crashed += 1
-    failure_report = _write_failure_report(
+    failure_report, failed_manifest = _write_failure_report(
         options.input_manifest,
         run_root,
         run_token,
@@ -1130,6 +1139,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         **counts,
         "worker_crashes": crashed,
         "failure_report": str(failure_report),
+        "failed_manifest": str(failed_manifest),
     }
     _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
     if service_root is not None:
