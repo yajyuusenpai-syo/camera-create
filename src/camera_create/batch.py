@@ -74,7 +74,7 @@ class BatchOptions:
     target_fps: float = 24.0
     max_frames: int = 241
     max_video_seconds: float = 10.06
-    processing_height: int = 480
+    vipe_height: int = 720
     extensions: tuple[str, ...] = DEFAULT_VIDEO_EXTENSIONS
     ffmpeg_command: str = "ffmpeg"
     overwrite: bool = False
@@ -304,7 +304,7 @@ def valid_existing_output(
     target_fps: float | None = None,
     max_frames: int | None = None,
     max_video_seconds: float | None = None,
-    processing_height: int | None = None,
+    vipe_height: int | None = None,
 ) -> bool:
     """Recognize only complete metric format-v2 outputs as resumable successes."""
     output = camera_json_path(video)
@@ -330,9 +330,9 @@ def valid_existing_output(
             valid &= (
                 abs(float(data.get("max_video_seconds", -1)) - max_video_seconds) < 1e-6
             )
-        if processing_height is not None:
+        if vipe_height is not None:
             resolution = data.get("intrinsics_inference_resolution", {})
-            valid &= int(resolution.get("height", -1)) == processing_height
+            valid &= int(resolution.get("height", -1)) == vipe_height
         return valid
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
@@ -379,7 +379,7 @@ def _manifest_payload(
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
-        "processing_height": options.processing_height,
+        "vipe_height": options.vipe_height,
         "extensions": list(options.extensions),
         "pi3x_chunk": options.pipeline_options.pi3x_chunk,
         "pi3x_stride": options.pipeline_options.pi3x_stride,
@@ -420,34 +420,46 @@ def prepare_video(
     target_fps: float,
     max_frames: int,
     max_seconds: float,
-    processing_height: int,
+    vipe_height: int,
     ffmpeg_command: str,
-) -> tuple[Path, float, float, tuple[int, int], tuple[int, int]]:
-    """Create a bounded 480p-style processing copy and return video metadata."""
+) -> tuple[Path, Path, float, float, tuple[int, int], tuple[int, int]]:
+    """Create aligned native-resolution depth and fixed-height VIPE videos."""
     directory.mkdir(parents=True, exist_ok=True)
     source_fps, _, _, source_width, source_height = _probe_video(source)
     processed = directory / f"{source.stem}.normalized.mp4"
+    vipe_video = directory / f"{source.stem}.vipe_{vipe_height}p.mp4"
     marker = directory / "normalized.json"
     expected = {
         "source": video_identity(source),
         "target_fps": target_fps,
         "max_frames": max_frames,
         "max_seconds": max_seconds,
-        "processing_height": processing_height,
+        "vipe_height": vipe_height,
     }
     if processed.is_file() and marker.is_file():
         try:
             state = json.loads(marker.read_text(encoding="utf-8"))
-            processed_fps, _, _, processed_width, processed_height = _probe_video(
+            processed_fps, processed_frames, _, _, processed_height = _probe_video(
                 processed
             )
-            if state == expected and abs(processed_fps - target_fps) < 1e-3:
+            cached_vipe = processed if processed_height == vipe_height else vipe_video
+            if (
+                state == expected
+                and abs(processed_fps - target_fps) < 1e-3
+                and cached_vipe.is_file()
+            ):
+                _, vipe_frames, _, vipe_width, cached_vipe_height = _probe_video(
+                    cached_vipe
+                )
+                if vipe_frames != processed_frames:
+                    raise ValueError("Cached depth and VIPE videos have different frames")
                 return (
                     processed,
+                    cached_vipe,
                     source_fps,
                     max_seconds,
                     (source_width, source_height),
-                    (processed_width, processed_height),
+                    (vipe_width, cached_vipe_height),
                 )
         except (OSError, ValueError, json.JSONDecodeError):
             pass
@@ -465,7 +477,7 @@ def prepare_video(
         "-t",
         str(max_seconds),
         "-vf",
-        f"fps={target_fps},scale=-2:{processing_height}",
+        f"fps={target_fps}",
         "-an",
         "-c:v",
         "libx264",
@@ -480,14 +492,49 @@ def prepare_video(
         str(processed),
     ]
     subprocess.run(command, check=True)
-    _, _, _, processed_width, processed_height = _probe_video(processed)
+    _, processed_frames, _, _, processed_height = _probe_video(processed)
+    if processed_height == vipe_height:
+        vipe_input = processed
+    else:
+        vipe_command = [
+            executable,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(processed),
+            "-vf",
+            f"scale=-2:{vipe_height}",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-frames:v",
+            str(max_frames),
+            str(vipe_video),
+        ]
+        subprocess.run(vipe_command, check=True)
+        vipe_input = vipe_video
+    _, vipe_frames, _, vipe_width, actual_vipe_height = _probe_video(vipe_input)
+    if vipe_frames != processed_frames:
+        raise RuntimeError(
+            "Depth and VIPE processing videos have different frame counts: "
+            f"{processed_frames} != {vipe_frames}"
+        )
     _atomic_checkpoint(marker, expected)
     return (
         processed,
+        vipe_input,
         source_fps,
         max_seconds,
         (source_width, source_height),
-        (processed_width, processed_height),
+        (vipe_width, actual_vipe_height),
     )
 
 
@@ -614,7 +661,7 @@ def _worker_main(
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
-            options.processing_height,
+            options.vipe_height,
         ):
             state["tasks"][relative] = {
                 "status": "completed",
@@ -656,7 +703,7 @@ def _worker_main(
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
-            options.processing_height,
+            options.vipe_height,
         ):
             state["tasks"][relative] = {
                 "status": "completed",
@@ -676,6 +723,7 @@ def _worker_main(
         try:
             (
                 normalized,
+                vipe_video,
                 source_fps,
                 applied_seconds,
                 source_resolution,
@@ -686,12 +734,16 @@ def _worker_main(
                 options.target_fps,
                 options.max_frames,
                 options.max_video_seconds,
-                options.processing_height,
+                options.vipe_height,
                 options.ffmpeg_command,
             )
             result_dir = camera_artifact_dir(video)
             CameraCreatePipeline(options.model_paths, pipeline_options).run(
-                normalized, result_dir, job_root / "pipeline"
+                normalized,
+                result_dir,
+                job_root / "pipeline",
+                vipe_video=vipe_video,
+                vipe_resolution=intrinsics_inference_resolution,
             )
             pending_output = camera_json_path(video).with_name(
                 f".{camera_json_path(video).name}.{lease.token}.pending"
@@ -769,8 +821,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         or options.max_video_seconds <= 0
     ):
         raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
-    if options.processing_height < 2 or options.processing_height % 2:
-        raise ValueError("processing_height must be a positive even integer")
+    if options.vipe_height < 2 or options.vipe_height % 2:
+        raise ValueError("vipe_height must be a positive even integer")
     options.model_paths.validate_depth_models()
     videos = load_video_manifest(options.input_manifest, options.extensions)
     validate_unique_camera_outputs(videos)
@@ -822,7 +874,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
-            options.processing_height,
+            options.vipe_height,
         )
         for video in videos
     )
@@ -838,7 +890,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
                 options.target_fps,
                 options.max_frames,
                 options.max_video_seconds,
-                options.processing_height,
+                options.vipe_height,
             )
             for tasks in assignments[
                 gpu_index
@@ -870,7 +922,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
-        "processing_height": options.processing_height,
+        "vipe_height": options.vipe_height,
         "already_complete": already_complete,
         "checkpoint_root": str(run_root),
         "overwrite": options.overwrite,

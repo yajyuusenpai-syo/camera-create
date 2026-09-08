@@ -28,8 +28,9 @@ JSON逐帧同时保留像素单位的 `intrinsics` 和分辨率无关的
 `intrinsics_normalized`。归一化规则是K矩阵第0行除以图像宽度W、第1行除以图像
 高度H，最后一行保持 `[0,0,1]`。
 
-默认先在现有FPS/时长归一化转码中保持宽高比缩放到480像素高，再把该视频交给
-VIPE估计内参。16:9视频通常得到854×480；可用 `--processing-height` 修改。
+Pi3X和MoGe-3保持原有空间处理逻辑，仅受 `--max-inference-side` 限制。VIPE默认
+接收保持宽高比缩放到720像素高的视频并估计内参，16:9视频通常得到1280×720；
+可用 `--vipe-height` 修改。
 像素内参 `intrinsics` 对应 `intrinsics_inference_resolution`，而不是
 `source_resolution`。兼容字段 `image_width`/`image_height` 也表示内参推理分辨率。
 

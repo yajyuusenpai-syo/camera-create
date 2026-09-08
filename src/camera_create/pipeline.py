@@ -66,12 +66,23 @@ class CameraCreatePipeline:
         self.models = models
         self.options = options or PipelineOptions()
 
-    def run(self, video: Path, output_dir: Path, work_dir: Path | None = None) -> dict:
+    def run(
+        self,
+        video: Path,
+        output_dir: Path,
+        work_dir: Path | None = None,
+        *,
+        vipe_video: Path | None = None,
+        vipe_resolution: tuple[int, int] | None = None,
+    ) -> dict:
         """Process one video and return its validation/metric summary."""
         video = video.resolve()
+        vipe_video = (vipe_video or video).resolve()
         output_dir = output_dir.resolve()
         if not video.is_file():
             raise FileNotFoundError(f"Input video does not exist: {video}")
+        if not vipe_video.is_file():
+            raise FileNotFoundError(f"VIPE input video does not exist: {vipe_video}")
         self.models.validate_depth_models()
         preflight_vipe_assets(
             self.models.vipe, self.options.allow_vipe_downloads
@@ -86,6 +97,7 @@ class CameraCreatePipeline:
         actual_work.mkdir(parents=True, exist_ok=True)
         cache_context = {
             "video": video_identity(video),
+            "vipe_video": video_identity(vipe_video),
             "pi3x_checkpoint": str(self.models.pi3x.resolve()),
             "moge3_checkpoint": str(self.models.moge3.resolve()),
             "pi3x_chunk": self.options.pi3x_chunk,
@@ -190,7 +202,7 @@ class CameraCreatePipeline:
                     shutil.rmtree(vipe_dir)
                 LOG.info("Running VIPE metric bundle adjustment")
                 run_vipe(
-                    video,
+                    vipe_video,
                     vipe_dir,
                     cache_path,
                     self.models.vipe,
@@ -199,11 +211,16 @@ class CameraCreatePipeline:
                     self.options.disable_cudnn,
                     self.options.disable_sdp,
                 )
+            intrinsics_width, intrinsics_height = vipe_resolution or (
+                pi3x_result.original_width,
+                pi3x_result.original_height,
+            )
             metadata = {
                 "input_video": str(video),
+                "vipe_input_video": str(vipe_video),
                 "frame_count": pi3x_result.frame_count,
-                "original_width": pi3x_result.original_width,
-                "original_height": pi3x_result.original_height,
+                "original_width": intrinsics_width,
+                "original_height": intrinsics_height,
                 "fps": pi3x_result.fps,
                 "depth_inference_width": pi3x_result.inference_width,
                 "depth_inference_height": pi3x_result.inference_height,
@@ -218,7 +235,12 @@ class CameraCreatePipeline:
                 "metric_scale_validated_against_ground_truth": False,
             }
             report = export_camera_artifacts(
-                video, vipe_dir, output_dir, pi3x_result.frame_count, scale, metadata
+                vipe_video,
+                vipe_dir,
+                output_dir,
+                pi3x_result.frame_count,
+                scale,
+                metadata,
             )
             stage_cache.completed("vipe")
             if self.options.keep_work:
