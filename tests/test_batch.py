@@ -184,7 +184,15 @@ def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:
     video.touch()
     output = camera_json_path(video)
     payload = export_camera_json_v2(
-        result, output, video.name, 30.0, 24.0, 241, 10.06
+        result,
+        output,
+        video.name,
+        30.0,
+        24.0,
+        241,
+        10.06,
+        (1920, 1080),
+        (1000, 700),
     )
     assert payload["format_version"] == 2
     assert payload["is_metric"] is True
@@ -194,9 +202,16 @@ def test_export_and_resume_metric_json_v2(tmp_path: Path) -> None:
     assert payload["frames"][0]["intrinsics"][0][0] == 500
     assert payload["frames"][0]["intrinsics_normalized"][0][0] == 0.5
     assert payload["frames"][0]["intrinsics_normalized"][1][1] == pytest.approx(0.7)
+    assert payload["source_resolution"] == {"width": 1920, "height": 1080}
+    assert payload["intrinsics_inference_resolution"] == {
+        "width": 1000,
+        "height": 700,
+    }
     assert payload["metric_scale_validated_against_ground_truth"] is False
     assert valid_existing_output(video)
     assert valid_existing_output(video, max_frames=241)
+    assert not valid_existing_output(video, processing_height=480)
+    assert valid_existing_output(video, processing_height=700)
     assert not valid_existing_output(video, max_frames=120)
     assert not valid_existing_output(video, target_fps=30.0)
     assert not valid_existing_output(video, max_video_seconds=5.0)
@@ -220,8 +235,10 @@ def test_prepare_video_applies_fps_frame_and_duration_limits(
     source.touch()
     commands: list[list[str]] = []
 
-    def fake_probe(path: Path) -> tuple[float, int, float]:
-        return (30.0, 300, 10.0) if path == source else (24.0, 241, 241 / 24)
+    def fake_probe(path: Path) -> tuple[float, int, float, int, int]:
+        if path == source:
+            return 30.0, 300, 10.0, 1280, 720
+        return 24.0, 241, 241 / 24, 854, 480
 
     def fake_run(command: list[str], check: bool) -> None:
         assert check
@@ -232,13 +249,15 @@ def test_prepare_video_applies_fps_frame_and_duration_limits(
     monkeypatch.setattr("camera_create.batch.shutil.which", lambda _name: "/bin/ffmpeg")
     monkeypatch.setattr("camera_create.batch.subprocess.run", fake_run)
 
-    processed, source_fps, max_seconds = prepare_video(
-        source, tmp_path / "work", 24.0, 241, 10.06, "ffmpeg"
+    processed, source_fps, max_seconds, source_size, inference_size = prepare_video(
+        source, tmp_path / "work", 24.0, 241, 10.06, 480, "ffmpeg"
     )
 
     assert processed.is_file()
     assert source_fps == 30.0
     assert max_seconds == 10.06
-    assert commands[0][commands[0].index("-vf") + 1] == "fps=24.0"
+    assert source_size == (1280, 720)
+    assert inference_size == (854, 480)
+    assert commands[0][commands[0].index("-vf") + 1] == "fps=24.0,scale=-2:480"
     assert commands[0][commands[0].index("-frames:v") + 1] == "241"
     assert commands[0][commands[0].index("-t") + 1] == "10.06"

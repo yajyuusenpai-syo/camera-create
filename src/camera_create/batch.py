@@ -74,6 +74,7 @@ class BatchOptions:
     target_fps: float = 24.0
     max_frames: int = 241
     max_video_seconds: float = 10.06
+    processing_height: int = 480
     extensions: tuple[str, ...] = DEFAULT_VIDEO_EXTENSIONS
     ffmpeg_command: str = "ffmpeg"
     overwrite: bool = False
@@ -303,6 +304,7 @@ def valid_existing_output(
     target_fps: float | None = None,
     max_frames: int | None = None,
     max_video_seconds: float | None = None,
+    processing_height: int | None = None,
 ) -> bool:
     """Recognize only complete metric format-v2 outputs as resumable successes."""
     output = camera_json_path(video)
@@ -328,6 +330,9 @@ def valid_existing_output(
             valid &= (
                 abs(float(data.get("max_video_seconds", -1)) - max_video_seconds) < 1e-6
             )
+        if processing_height is not None:
+            resolution = data.get("intrinsics_inference_resolution", {})
+            valid &= int(resolution.get("height", -1)) == processing_height
         return valid
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
@@ -374,6 +379,7 @@ def _manifest_payload(
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
+        "processing_height": options.processing_height,
         "extensions": list(options.extensions),
         "pi3x_chunk": options.pipeline_options.pi3x_chunk,
         "pi3x_stride": options.pipeline_options.pi3x_stride,
@@ -394,16 +400,18 @@ def _manifest_payload(
     }
 
 
-def _probe_video(path: Path) -> tuple[float, int, float]:
+def _probe_video(path: Path) -> tuple[float, int, float, int, int]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
         raise RuntimeError(f"Cannot open video: {path}")
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
     frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     capture.release()
-    if fps <= 0:
-        raise RuntimeError(f"Video reports an invalid FPS: {path}")
-    return fps, frames, frames / fps if frames > 0 else 0.0
+    if fps <= 0 or width <= 0 or height <= 0:
+        raise RuntimeError(f"Video reports invalid FPS or resolution: {path}")
+    return fps, frames, frames / fps if frames > 0 else 0.0, width, height
 
 
 def prepare_video(
@@ -412,11 +420,12 @@ def prepare_video(
     target_fps: float,
     max_frames: int,
     max_seconds: float,
+    processing_height: int,
     ffmpeg_command: str,
-) -> tuple[Path, float, float]:
-    """Create a bounded constant-FPS processing copy and return its FPS metadata."""
+) -> tuple[Path, float, float, tuple[int, int], tuple[int, int]]:
+    """Create a bounded 480p-style processing copy and return video metadata."""
     directory.mkdir(parents=True, exist_ok=True)
-    source_fps, _, _ = _probe_video(source)
+    source_fps, _, _, source_width, source_height = _probe_video(source)
     processed = directory / f"{source.stem}.normalized.mp4"
     marker = directory / "normalized.json"
     expected = {
@@ -424,13 +433,22 @@ def prepare_video(
         "target_fps": target_fps,
         "max_frames": max_frames,
         "max_seconds": max_seconds,
+        "processing_height": processing_height,
     }
     if processed.is_file() and marker.is_file():
         try:
             state = json.loads(marker.read_text(encoding="utf-8"))
-            processed_fps, _, _ = _probe_video(processed)
+            processed_fps, _, _, processed_width, processed_height = _probe_video(
+                processed
+            )
             if state == expected and abs(processed_fps - target_fps) < 1e-3:
-                return processed, source_fps, max_seconds
+                return (
+                    processed,
+                    source_fps,
+                    max_seconds,
+                    (source_width, source_height),
+                    (processed_width, processed_height),
+                )
         except (OSError, ValueError, json.JSONDecodeError):
             pass
     executable = shutil.which(ffmpeg_command)
@@ -447,7 +465,7 @@ def prepare_video(
         "-t",
         str(max_seconds),
         "-vf",
-        f"fps={target_fps}",
+        f"fps={target_fps},scale=-2:{processing_height}",
         "-an",
         "-c:v",
         "libx264",
@@ -462,9 +480,15 @@ def prepare_video(
         str(processed),
     ]
     subprocess.run(command, check=True)
-    _probe_video(processed)
+    _, _, _, processed_width, processed_height = _probe_video(processed)
     _atomic_checkpoint(marker, expected)
-    return processed, source_fps, max_seconds
+    return (
+        processed,
+        source_fps,
+        max_seconds,
+        (source_width, source_height),
+        (processed_width, processed_height),
+    )
 
 
 def _atomic_checkpoint(path: Path, state: dict[str, Any]) -> None:
@@ -590,6 +614,7 @@ def _worker_main(
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
+            options.processing_height,
         ):
             state["tasks"][relative] = {
                 "status": "completed",
@@ -631,6 +656,7 @@ def _worker_main(
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
+            options.processing_height,
         ):
             state["tasks"][relative] = {
                 "status": "completed",
@@ -648,12 +674,19 @@ def _worker_main(
         }
         _atomic_checkpoint(checkpoint_path, state)
         try:
-            normalized, source_fps, applied_seconds = prepare_video(
+            (
+                normalized,
+                source_fps,
+                applied_seconds,
+                source_resolution,
+                intrinsics_inference_resolution,
+            ) = prepare_video(
                 video,
                 job_root,
                 options.target_fps,
                 options.max_frames,
                 options.max_video_seconds,
+                options.processing_height,
                 options.ffmpeg_command,
             )
             result_dir = camera_artifact_dir(video)
@@ -672,6 +705,8 @@ def _worker_main(
                 options.target_fps,
                 options.max_frames,
                 applied_seconds,
+                source_resolution,
+                intrinsics_inference_resolution,
             )
             lease.assert_owned()
             pending_output.replace(camera_json_path(video))
@@ -734,6 +769,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         or options.max_video_seconds <= 0
     ):
         raise ValueError("target_fps, max_frames and max_video_seconds must be positive")
+    if options.processing_height < 2 or options.processing_height % 2:
+        raise ValueError("processing_height must be a positive even integer")
     options.model_paths.validate_depth_models()
     videos = load_video_manifest(options.input_manifest, options.extensions)
     validate_unique_camera_outputs(videos)
@@ -785,6 +822,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             options.target_fps,
             options.max_frames,
             options.max_video_seconds,
+            options.processing_height,
         )
         for video in videos
     )
@@ -800,6 +838,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
                 options.target_fps,
                 options.max_frames,
                 options.max_video_seconds,
+                options.processing_height,
             )
             for tasks in assignments[
                 gpu_index
@@ -831,6 +870,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
+        "processing_height": options.processing_height,
         "already_complete": already_complete,
         "checkpoint_root": str(run_root),
         "overwrite": options.overwrite,

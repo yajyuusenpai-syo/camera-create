@@ -213,6 +213,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-video-seconds", type=float, default=10.06)
     parser.add_argument(
+        "--processing-height",
+        type=int,
+        default=480,
+        help=(
+            "Spatial height sent to the camera pipeline; aspect ratio is preserved "
+            "(default: 480)"
+        ),
+    )
+    parser.add_argument(
         "--video-extensions",
         default=",".join(DEFAULT_VIDEO_EXTENSIONS),
         help="Comma-separated video extensions accepted in the input manifest",
@@ -317,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             target_fps=args.target_fps,
             max_frames=args.max_frames,
             max_video_seconds=args.max_video_seconds,
+            processing_height=args.processing_height,
             extensions=extensions,
             ffmpeg_command=args.ffmpeg_command,
             overwrite=args.overwrite,

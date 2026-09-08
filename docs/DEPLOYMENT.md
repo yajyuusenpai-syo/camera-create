@@ -14,7 +14,9 @@
 - Linux 推荐；VIPE 含 CUDA 扩展，Windows 原生环境通常不适合作为生产环境。
 - 三套环境统一使用 Python 3.10，但分别安装依赖，不共享 site-packages。
 - 推荐显存 48 GB 以上；显存较小时降低 `--pi3x-chunk` 和
-  `--max-inference-side`。
+  `--max-inference-side`。默认还会在同一次FFmpeg归一化转码中将视频保持宽高比
+  缩放到480像素高，再送入完整camera pipeline；可用
+  `--processing-height 480` 显式设置。
 
 采用三环境是合理且必要的：Pi3X 固定 NumPy 1.26.4，而 MoGe-3 要求 NumPy 2.x；
 VIPE 还需要独立编译 CUDA 扩展。三个阶段通过 NPZ/JSON 文件衔接，因此不存在

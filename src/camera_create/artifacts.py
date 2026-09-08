@@ -196,6 +196,8 @@ def export_camera_json_v2(
     target_fps: float,
     max_frames: int,
     max_video_seconds: float,
+    source_resolution: tuple[int, int],
+    intrinsics_inference_resolution: tuple[int, int],
 ) -> dict:
     """Convert validated metric NPY artifacts into the per-frame JSON v2 contract."""
     poses_path = result_dir / "poses_c2w_metric.npy"
@@ -224,6 +226,14 @@ def export_camera_json_v2(
             )
     image_width = int(validation.get("original_width", 0))
     image_height = int(validation.get("original_height", 0))
+    source_width, source_height = source_resolution
+    inference_width, inference_height = intrinsics_inference_resolution
+    if (image_width, image_height) != (inference_width, inference_height):
+        raise ValueError(
+            "VIPE intrinsics resolution does not match the processing video: "
+            f"report={(image_width, image_height)}, processing="
+            f"{(inference_width, inference_height)}"
+        )
     normalized_intrinsics = normalize_intrinsics_k(
         intrinsics, image_width, image_height
     )
@@ -241,6 +251,14 @@ def export_camera_json_v2(
         "max_video_seconds": float(max_video_seconds),
         "image_width": image_width,
         "image_height": image_height,
+        "source_resolution": {
+            "width": int(source_width),
+            "height": int(source_height),
+        },
+        "intrinsics_inference_resolution": {
+            "width": int(inference_width),
+            "height": int(inference_height),
+        },
         "camera_convention": "OpenCV: +X right, +Y down, +Z forward",
         "intrinsics_convention": "pixel coordinates for image_width/image_height",
         "intrinsics_normalized_convention": (

@@ -7,7 +7,8 @@
 /data/videos/clip.mp4.camera/
 ```
 
-`cam_clip.json` 使用 format v2，包含源/目标 FPS、帧数、metric 标志，以及每帧
+`cam_clip.json` 使用 format v2，包含源/目标 FPS、帧数、metric 标志、原视频
+`source_resolution`、内参推理所用的 `intrinsics_inference_resolution`，以及每帧
 的 `frame_index`、`timestamp_seconds`、4x4 `c2w` 和 3x3 `intrinsics`。
 `clip.mp4.camera/` 包含：
 
@@ -26,6 +27,11 @@
 JSON逐帧同时保留像素单位的 `intrinsics` 和分辨率无关的
 `intrinsics_normalized`。归一化规则是K矩阵第0行除以图像宽度W、第1行除以图像
 高度H，最后一行保持 `[0,0,1]`。
+
+默认先在现有FPS/时长归一化转码中保持宽高比缩放到480像素高，再把该视频交给
+VIPE估计内参。16:9视频通常得到854×480；可用 `--processing-height` 修改。
+像素内参 `intrinsics` 对应 `intrinsics_inference_resolution`，而不是
+`source_resolution`。兼容字段 `image_width`/`image_height` 也表示内参推理分辨率。
 
 `intrinsics` 不是“米制”量；它以像素表达。`is_metric: true` 表示外参平移继承
 MoGe-3单目metric深度并以米为目标单位，但不是传感器或GT尺度认证。JSON同时写入
