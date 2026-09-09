@@ -115,9 +115,12 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 ```
 
 报告包含失败视频路径、worker/GPU、完整 traceback、已完成阶段和保留的stage cache
-路径。`camera_create_failed.txt` 与输入TXT格式一致，每行一个失败视频的绝对路径，
+路径。相机数值校验不通过记为 `rejected`，会跳过该视频且不使整个DLC任务失败；
+真正的程序、环境或CUDA异常仍记为 `failed` 并返回非零退出码。完整traceback只写入
+诊断JSON和worker checkpoint。`camera_create_failed.txt` 与输入TXT格式一致，每行
+一个失败或拒收视频的绝对路径，
 可以直接再次传给 `--input`。即使没有失败也会生成空TXT和诊断报告，并写入
-`failed_count: 0`，便于批量核查。
+`issue_count: 0`，便于批量核查。
 
 ## Checkpoint与防重复
 

@@ -53,6 +53,7 @@ def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:
     run_root = tmp_path / "state" / "run_abc"
     run_root.mkdir(parents=True)
     failed_video = tmp_path / "bad.mp4"
+    rejected_video = tmp_path / "rejected.mp4"
     (run_root / "worker_003.json").write_text(
         json.dumps(
             {
@@ -64,6 +65,19 @@ def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:
                         "completed_stages": ["pi3x", "moge3", "metric_depth"],
                         "stage_cache": "/cache/bad",
                         "error": "Traceback\nRuntimeError: VIPE failed",
+                    },
+                    str(rejected_video): {
+                        "status": "rejected",
+                        "failure_kind": "data_validation",
+                        "failed_stage": "camera_validation",
+                        "completed_stages": [
+                            "pi3x",
+                            "moge3",
+                            "metric_depth",
+                            "vipe",
+                        ],
+                        "error": "CameraValidationError: invalid camera",
+                        "validation": {"valid": False, "all_finite": False},
                     }
                 },
             }
@@ -78,11 +92,18 @@ def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:
 
     assert report_path == tmp_path / "clip_1.camera_create_failures.json"
     assert failed_manifest == tmp_path / "clip_1.camera_create_failed.txt"
-    assert failed_manifest.read_text(encoding="utf-8") == f"{failed_video}\n"
+    assert failed_manifest.read_text(encoding="utf-8") == (
+        f"{failed_video}\n{rejected_video}\n"
+    )
+    assert report["issue_count"] == 2
     assert report["failed_count"] == 1
+    assert report["rejected_count"] == 1
     assert report["failures"][0]["video_path"] == str(failed_video)
     assert report["failures"][0]["likely_failed_stage"] == "vipe"
     assert "RuntimeError: VIPE failed" in report["failures"][0]["error"]
+    assert report["failures"][1]["outcome"] == "rejected"
+    assert report["failures"][1]["likely_failed_stage"] == "camera_validation"
+    assert report["failures"][1]["validation"]["all_finite"] is False
 
 
 def test_empty_failed_manifest_is_still_created(tmp_path: Path) -> None:

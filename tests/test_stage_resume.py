@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from camera_create.artifacts import CameraValidationError
 from camera_create.config import ModelPaths
 from camera_create.pipeline import CameraCreatePipeline, PipelineOptions
 from camera_create.stage_cache import StageCache, fingerprint
@@ -113,3 +114,54 @@ def test_pipeline_reuses_all_completed_stages(
 
     assert calls == {"pi3x": 1, "moge3": 1, "vipe": 2}
     assert (work / "metric_depth_cache.npz").is_file()
+
+
+def test_pipeline_reuses_vipe_after_camera_validation_rejection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    pi3x_ckpt = tmp_path / "pi3x"
+    moge_ckpt = tmp_path / "moge3"
+    pi3x_ckpt.mkdir()
+    moge_ckpt.mkdir()
+    (pi3x_ckpt / "model").touch()
+    (moge_ckpt / "model").touch()
+    models = ModelPaths(pi3x_ckpt, moge_ckpt, tmp_path / "vipe-cache")
+    calls = {"vipe": 0, "export": 0}
+
+    def fake_depth(*args):
+        result = _worker_result()
+        _write_worker(args[3], result)
+        return result
+
+    def fake_vipe(_video, output, *_args):
+        calls["vipe"] += 1
+        output.mkdir(parents=True, exist_ok=True)
+
+    def fake_export(*_args):
+        calls["export"] += 1
+        if calls["export"] == 1:
+            raise CameraValidationError(
+                {"valid": False, "all_finite": False},
+                tmp_path / "camera_report.json",
+            )
+        return {"valid": True}
+
+    monkeypatch.setattr("camera_create.pipeline.run_pi3x_worker", fake_depth)
+    monkeypatch.setattr("camera_create.pipeline.run_moge3_worker", fake_depth)
+    monkeypatch.setattr("camera_create.pipeline.run_vipe", fake_vipe)
+    monkeypatch.setattr(
+        "camera_create.pipeline.preflight_vipe_integration", lambda *_args: None
+    )
+    monkeypatch.setattr("camera_create.pipeline.export_camera_artifacts", fake_export)
+    pipeline = CameraCreatePipeline(
+        models, PipelineOptions(allow_vipe_downloads=True)
+    )
+    work = tmp_path / "resume"
+
+    with pytest.raises(CameraValidationError, match="failed validation"):
+        pipeline.run(video, tmp_path / "output", work)
+    pipeline.run(video, tmp_path / "output", work)
+
+    assert calls == {"vipe": 1, "export": 2}

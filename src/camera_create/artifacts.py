@@ -9,6 +9,31 @@ import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
 
 
+class CameraValidationError(RuntimeError):
+    """Signal that model output exists but fails camera quality validation."""
+
+    def __init__(self, report: dict, report_path: Path):
+        self.report = report
+        self.report_path = report_path
+        failed_checks = [
+            name
+            for name in (
+                "all_finite",
+                "positive_focal_lengths",
+                "first_pose_identity",
+            )
+            if not report.get(name, False)
+        ]
+        if report.get("max_rotation_orthogonality_error", 0.0) >= 1e-3:
+            failed_checks.append("rotation_orthogonality")
+        if report.get("max_rotation_determinant_error", 0.0) >= 1e-3:
+            failed_checks.append("rotation_determinant")
+        reason = ", ".join(failed_checks) or "unknown_validation_check"
+        super().__init__(
+            f"Camera output failed validation ({reason}); inspect {report_path}"
+        )
+
+
 def _project_rotation(matrix: np.ndarray) -> np.ndarray:
     u, _, vh = np.linalg.svd(matrix)
     rotation = u @ vh
@@ -178,13 +203,12 @@ def export_camera_artifacts(
     np.save(output_dir / "scale_per_frame.npy", scale_history.astype(np.float32))
     report = validate_camera(poses_c2w, intrinsics, scale_history)
     report.update(metadata)
-    (output_dir / "camera_report.json").write_text(
+    report_path = output_dir / "camera_report.json"
+    report_path.write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
     if not report["valid"]:
-        raise RuntimeError(
-            f"Camera output failed validation; inspect {output_dir / 'camera_report.json'}"
-        )
+        raise CameraValidationError(report, report_path)
     return report
 
 

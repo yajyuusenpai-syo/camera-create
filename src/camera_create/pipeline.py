@@ -211,6 +211,7 @@ class CameraCreatePipeline:
                     self.options.disable_cudnn,
                     self.options.disable_sdp,
                 )
+                stage_cache.completed("vipe")
             intrinsics_width, intrinsics_height = vipe_resolution or (
                 pi3x_result.original_width,
                 pi3x_result.original_height,
@@ -242,7 +243,7 @@ class CameraCreatePipeline:
                 scale,
                 metadata,
             )
-            stage_cache.completed("vipe")
+            stage_cache.completed("camera_export")
             if self.options.keep_work:
                 retained = output_dir / "work"
                 if retained.exists():

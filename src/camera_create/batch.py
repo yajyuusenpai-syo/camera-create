@@ -21,7 +21,7 @@ from typing import Any
 import cv2
 from tqdm import tqdm
 
-from .artifacts import export_camera_json_v2
+from .artifacts import CameraValidationError, export_camera_json_v2
 from .config import ModelPaths
 from .distributed import (
     DistributedLayout,
@@ -572,10 +572,15 @@ def _write_failure_report(
         except (OSError, json.JSONDecodeError):
             continue
         for video_path, state in worker.get("tasks", {}).items():
-            if not isinstance(state, dict) or state.get("status") != "failed":
+            if not isinstance(state, dict) or state.get("status") not in {
+                "failed",
+                "rejected",
+            }:
                 continue
             completed = list(state.get("completed_stages", []))
-            if not completed:
+            if state.get("failed_stage"):
+                likely_stage = str(state["failed_stage"])
+            elif not completed:
                 likely_stage = "video_preparation_or_pi3x"
             elif completed[-1] == "pi3x":
                 likely_stage = "moge3"
@@ -588,16 +593,21 @@ def _write_failure_report(
             failures.append(
                 {
                     "video_path": video_path,
+                    "outcome": state.get("status"),
+                    "failure_kind": state.get("failure_kind", "runtime_error"),
                     "worker_id": worker.get("global_worker_id", worker.get("worker_id")),
                     "gpu_id": worker.get("gpu_id"),
                     "likely_failed_stage": likely_stage,
                     "completed_stages": completed,
                     "stage_cache": state.get("stage_cache"),
                     "error": state.get("error", "<missing traceback>"),
+                    "validation": state.get("validation"),
                     "worker_checkpoint": str(checkpoint),
                 }
             )
     failures.sort(key=lambda item: item["video_path"])
+    rejected_count = sum(item["outcome"] == "rejected" for item in failures)
+    failed_count = sum(item["outcome"] == "failed" for item in failures)
     node_suffix = "" if num_nodes == 1 else f".node_{node_rank:03d}"
     report_path = input_manifest.with_name(
         f"{input_manifest.stem}.camera_create_failures{node_suffix}.json"
@@ -613,7 +623,9 @@ def _write_failure_report(
             "run_id": run_id,
             "node_rank": node_rank,
             "num_nodes": num_nodes,
-            "failed_count": len(failures),
+            "issue_count": len(failures),
+            "failed_count": failed_count,
+            "rejected_count": rejected_count,
             "worker_crashes": worker_crashes,
             "failures": failures,
         },
@@ -857,13 +869,22 @@ def _worker_main(
                     ).get("completed_stages", [])
                 except (OSError, json.JSONDecodeError):
                     pass
+            rejected = isinstance(error, CameraValidationError)
             state["tasks"][relative] = {
-                "status": "failed",
+                "status": "rejected" if rejected else "failed",
+                "failure_kind": "data_validation" if rejected else "runtime_error",
+                "failed_stage": "camera_validation" if rejected else None,
                 "error": detail,
+                "validation": error.report if rejected else None,
                 "stage_cache": str(job_root),
                 "completed_stages": completed_stages,
             }
-            event = ("failed", global_worker_id, relative, str(error))
+            event = (
+                "rejected" if rejected else "failed",
+                global_worker_id,
+                relative,
+                str(error),
+            )
         finally:
             lease.release()
         _atomic_checkpoint(checkpoint_path, state)
@@ -1022,13 +1043,24 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     }
     print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     if not videos:
+        failure_report, failed_manifest = _write_failure_report(
+            options.input_manifest,
+            run_root,
+            run_token,
+            options.node_rank,
+            options.num_nodes,
+            0,
+        )
         result = {
             **summary,
             "completed": 0,
             "skipped": 0,
+            "rejected": 0,
             "claimed_elsewhere": 0,
             "failed": 0,
             "worker_crashes": 0,
+            "failure_report": str(failure_report),
+            "failed_manifest": str(failed_manifest),
         }
         _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
         node_lease.release()
@@ -1096,6 +1128,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     counts = {
         "completed": 0,
         "skipped": 0,
+        "rejected": 0,
         "claimed_elsewhere": 0,
         "failed": 0,
     }
