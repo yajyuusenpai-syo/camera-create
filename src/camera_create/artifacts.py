@@ -15,7 +15,8 @@ class CameraValidationError(RuntimeError):
     def __init__(self, report: dict, report_path: Path):
         self.report = report
         self.report_path = report_path
-        failed_checks = [
+        failure = report.get("validation_failure")
+        failed_checks = [str(failure)] if failure else [
             name
             for name in (
                 "all_finite",
@@ -24,10 +25,11 @@ class CameraValidationError(RuntimeError):
             )
             if not report.get(name, False)
         ]
-        if report.get("max_rotation_orthogonality_error", 0.0) >= 1e-3:
-            failed_checks.append("rotation_orthogonality")
-        if report.get("max_rotation_determinant_error", 0.0) >= 1e-3:
-            failed_checks.append("rotation_determinant")
+        if not failure:
+            if report.get("max_rotation_orthogonality_error", 0.0) >= 1e-3:
+                failed_checks.append("rotation_orthogonality")
+            if report.get("max_rotation_determinant_error", 0.0) >= 1e-3:
+                failed_checks.append("rotation_determinant")
         reason = ", ".join(failed_checks) or "unknown_validation_check"
         super().__init__(
             f"Camera output failed validation ({reason}); inspect {report_path}"
@@ -173,11 +175,24 @@ def export_camera_artifacts(
     """Load VIPE output and write the public camera_create output contract."""
     sparse_poses, pose_indices = _load_vipe_npz(video, vipe_dir, "pose")
     sparse_intrinsics, intr_indices = _load_vipe_npz(video, vipe_dir, "intrinsics")
-    poses_c2w = interpolate_poses(sparse_poses, pose_indices, frame_count)
-    intrinsics = interpolate_intrinsics(
-        sparse_intrinsics[:, :4], intr_indices, frame_count
-    )
-    poses_w2c = np.linalg.inv(poses_c2w).astype(np.float32)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "camera_report.json"
+    try:
+        poses_c2w = interpolate_poses(sparse_poses, pose_indices, frame_count)
+        intrinsics = interpolate_intrinsics(
+            sparse_intrinsics[:, :4], intr_indices, frame_count
+        )
+        poses_w2c = np.linalg.inv(poses_c2w).astype(np.float32)
+    except (IndexError, ValueError, np.linalg.LinAlgError) as error:
+        report = {
+            "valid": False,
+            "validation_failure": "malformed_vipe_camera_output",
+            "validation_error_type": type(error).__name__,
+            "validation_error": str(error),
+            **metadata,
+        }
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        raise CameraValidationError(report, report_path) from error
     k_matrices = intrinsics_to_k(intrinsics)
     normalized_k = normalize_intrinsics_k(
         k_matrices,
@@ -193,7 +208,6 @@ def export_camera_artifacts(
         ),
         axis=1,
     )
-    output_dir.mkdir(parents=True, exist_ok=True)
     np.save(output_dir / "poses_c2w_metric.npy", poses_c2w)
     np.save(output_dir / "extrinsics_w2c_metric.npy", poses_w2c)
     np.save(output_dir / "intrinsics.npy", intrinsics[:, None, :])
@@ -203,7 +217,6 @@ def export_camera_artifacts(
     np.save(output_dir / "scale_per_frame.npy", scale_history.astype(np.float32))
     report = validate_camera(poses_c2w, intrinsics, scale_history)
     report.update(metadata)
-    report_path = output_dir / "camera_report.json"
     report_path.write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
