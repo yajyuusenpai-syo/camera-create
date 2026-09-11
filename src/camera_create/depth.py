@@ -121,7 +121,7 @@ def save_depth_cache(
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("wb") as stream:
-        np.savez_compressed(
+        np.savez(
             stream, depths=depths, scale_history=scale, raw_scale=raw_scale
         )
     temporary.replace(path)

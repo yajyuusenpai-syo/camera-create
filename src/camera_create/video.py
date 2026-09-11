@@ -21,7 +21,7 @@ class VideoData:
         return int(self.frames_rgb.shape[0])
 
 
-def _inference_size(
+def inference_size(
     width: int, height: int, max_side: int, multiple: int = 14
 ) -> tuple[int, int]:
     scale = min(1.0, max_side / max(width, height))
@@ -39,7 +39,7 @@ def read_video(video_path: Path, max_inference_side: int = 560) -> VideoData:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-    infer_w, infer_h = _inference_size(width, height, max_inference_side)
+    infer_w, infer_h = inference_size(width, height, max_inference_side)
     frames: list[np.ndarray] = []
     while True:
         ok, bgr = cap.read()

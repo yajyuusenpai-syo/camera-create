@@ -317,7 +317,9 @@ def test_prepare_video_applies_fps_frame_and_duration_limits(
     def fake_run(command: list[str], check: bool) -> None:
         assert check
         commands.append(command)
-        Path(command[-1]).touch()
+        for token in command:
+            if token.endswith(".mp4") and token != str(source):
+                Path(token).touch()
 
     monkeypatch.setattr("camera_create.batch._probe_video", fake_probe)
     monkeypatch.setattr("camera_create.batch.shutil.which", lambda _name: "/bin/ffmpeg")
@@ -338,7 +340,11 @@ def test_prepare_video_applies_fps_frame_and_duration_limits(
     assert vipe_video.is_file()
     assert source_size == (1920, 1080)
     assert inference_size == (1280, 720)
-    assert commands[0][commands[0].index("-vf") + 1] == "fps=24.0"
-    assert commands[1][commands[1].index("-vf") + 1] == "scale=-2:720"
+    assert len(commands) == 1
+    graph = commands[0][commands[0].index("-filter_complex") + 1]
+    assert "trim=duration=10.06" in graph
+    assert "fps=24.0,split=2" in graph
+    assert "scale=560:308" in graph
+    assert "scale=1280:720" in graph
     assert commands[0][commands[0].index("-frames:v") + 1] == "241"
-    assert commands[0][commands[0].index("-t") + 1] == "10.06"
+    assert "-t" not in commands[0]

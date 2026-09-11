@@ -32,6 +32,14 @@ from .distributed import (
 )
 from .pipeline import CameraCreatePipeline, PipelineOptions
 from .stage_cache import video_identity
+from .video import inference_size
+from .vipe_runner import (
+    VipeServiceEndpoint,
+    VipeServiceProcess,
+    preflight_vipe_assets,
+    preflight_vipe_integration,
+    start_vipe_service,
+)
 from .worker_runner import (
     DepthServiceEndpoint,
     DepthServiceProcess,
@@ -79,6 +87,10 @@ class BatchOptions:
     ffmpeg_command: str = "ffmpeg"
     overwrite: bool = False
     keep_stage_cache: bool = False
+    local_work_root: Path | None = None
+    vipe_services_per_gpu: int = 1
+    vipe_recycle_every: int = 25
+    persistent_vipe: bool = True
 
 
 def discover_videos(root: Path, extensions: tuple[str, ...]) -> list[Path]:
@@ -242,6 +254,61 @@ def _start_depth_service_group(
     return ordered, {key: completed[key].endpoint for key in keys}
 
 
+def _start_vipe_service_group(
+    gpu_ids: tuple[int, ...], options: BatchOptions, service_root: Path
+) -> tuple[list[VipeServiceProcess], dict[tuple[int, int], VipeServiceEndpoint]]:
+    """Start reusable VIPE pipelines in parallel waves across physical GPUs."""
+    LOG.info(
+        "Loading %d persistent VIPE services per GPU on GPUs %s",
+        options.vipe_services_per_gpu,
+        ",".join(str(gpu_id) for gpu_id in gpu_ids),
+    )
+    completed: dict[tuple[int, int], VipeServiceProcess] = {}
+    failures: list[BaseException] = []
+    for replica_id in range(options.vipe_services_per_gpu):
+        with ThreadPoolExecutor(max_workers=len(gpu_ids)) as executor:
+            futures = {
+                executor.submit(
+                    start_vipe_service,
+                    options.pipeline_options.vipe_command,
+                    options.model_paths.vipe,
+                    gpu_id,
+                    service_root / f"vipe_gpu_{gpu_id}_replica_{replica_id}.json",
+                    allow_downloads=options.pipeline_options.allow_vipe_downloads,
+                    disable_cudnn=options.pipeline_options.disable_cudnn,
+                    disable_sdp=options.pipeline_options.disable_sdp,
+                    recycle_every=options.vipe_recycle_every,
+                    assets_preflight_done=True,
+                ): gpu_id
+                for gpu_id in gpu_ids
+            }
+            for future in as_completed(futures):
+                gpu_id = futures[future]
+                try:
+                    completed[(gpu_id, replica_id)] = future.result()
+                    LOG.info(
+                        "Persistent VIPE service replica %d/%d ready on GPU %d",
+                        replica_id + 1,
+                        options.vipe_services_per_gpu,
+                        gpu_id,
+                    )
+                except BaseException as error:  # noqa: BLE001
+                    failures.append(error)
+        if failures:
+            break
+    if failures:
+        for service in completed.values():
+            service.stop()
+        raise RuntimeError("Failed to load persistent VIPE service group") from failures[0]
+    keys = [
+        (gpu_id, replica_id)
+        for replica_id in range(options.vipe_services_per_gpu)
+        for gpu_id in gpu_ids
+    ]
+    ordered = [completed[key] for key in keys]
+    return ordered, {key: completed[key].endpoint for key in keys}
+
+
 def camera_json_path(video: Path) -> Path:
     """Place one camera JSON beside its source using the extension-free stem."""
     return video.parent / f"cam_{video.stem}.json"
@@ -376,6 +443,9 @@ def _manifest_payload(
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
         "depth_services_per_gpu": options.depth_services_per_gpu,
+        "vipe_services_per_gpu": options.vipe_services_per_gpu,
+        "vipe_recycle_every": options.vipe_recycle_every,
+        "persistent_vipe": options.persistent_vipe,
         "target_fps": options.target_fps,
         "max_frames": options.max_frames,
         "max_video_seconds": options.max_video_seconds,
@@ -422,11 +492,15 @@ def prepare_video(
     max_seconds: float,
     vipe_height: int,
     ffmpeg_command: str,
+    max_inference_side: int = 560,
 ) -> tuple[Path, Path, float, float, tuple[int, int], tuple[int, int]]:
-    """Create aligned native-resolution depth and fixed-height VIPE videos."""
+    """Decode once and create aligned depth-sized and fixed-height VIPE videos."""
     directory.mkdir(parents=True, exist_ok=True)
     source_fps, _, _, source_width, source_height = _probe_video(source)
-    processed = directory / f"{source.stem}.normalized.mp4"
+    depth_width, depth_height = inference_size(
+        source_width, source_height, max_inference_side
+    )
+    processed = directory / f"{source.stem}.depth_{max_inference_side}.mp4"
     vipe_video = directory / f"{source.stem}.vipe_{vipe_height}p.mp4"
     marker = directory / "normalized.json"
     expected = {
@@ -435,17 +509,25 @@ def prepare_video(
         "max_frames": max_frames,
         "max_seconds": max_seconds,
         "vipe_height": vipe_height,
+        "max_inference_side": max_inference_side,
+        "preparation_schema": 2,
     }
     if processed.is_file() and marker.is_file():
         try:
             state = json.loads(marker.read_text(encoding="utf-8"))
-            processed_fps, processed_frames, _, _, processed_height = _probe_video(
+            processed_fps, processed_frames, _, cached_depth_width, cached_depth_height = _probe_video(
                 processed
             )
-            cached_vipe = processed if processed_height == vipe_height else vipe_video
+            cached_vipe = (
+                processed
+                if cached_depth_height == vipe_height
+                else vipe_video
+            )
             if (
                 state == expected
                 and abs(processed_fps - target_fps) < 1e-3
+                and (cached_depth_width, cached_depth_height)
+                == (depth_width, depth_height)
                 and cached_vipe.is_file()
             ):
                 _, vipe_frames, _, vipe_width, cached_vipe_height = _probe_video(
@@ -466,61 +548,40 @@ def prepare_video(
     executable = shutil.which(ffmpeg_command)
     if executable is None:
         raise RuntimeError(f"ffmpeg executable not found: {ffmpeg_command}")
-    command = [
-        executable,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(source),
-        "-t",
-        str(max_seconds),
-        "-vf",
-        f"fps={target_fps}",
-        "-an",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-frames:v",
-        str(max_frames),
-        str(processed),
-    ]
-    subprocess.run(command, check=True)
-    _, processed_frames, _, _, processed_height = _probe_video(processed)
-    if processed_height == vipe_height:
+    vipe_width = max(2, round(source_width * vipe_height / source_height / 2) * 2)
+    if (depth_width, depth_height) == (vipe_width, vipe_height):
+        command = [
+            executable, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-t", str(max_seconds),
+            "-vf", f"fps={target_fps},scale={depth_width}:{depth_height}",
+            "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-frames:v", str(max_frames), str(processed),
+        ]
+        subprocess.run(command, check=True)
         vipe_input = processed
     else:
-        vipe_command = [
-            executable,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
+        # One decoder and one filter graph feed both encoders. This avoids reading
+        # the source twice and avoids writing a full-resolution intermediate.
+        filter_graph = (
+            f"[0:v]trim=duration={max_seconds},setpts=PTS-STARTPTS,"
+            f"fps={target_fps},split=2[depth_src][vipe_src];"
+            f"[depth_src]scale={depth_width}:{depth_height}[depth];"
+            f"[vipe_src]scale={vipe_width}:{vipe_height}[vipe]"
+        )
+        command = [
+            executable, "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source),
+            "-filter_complex", filter_graph,
+            "-map", "[depth]", "-an", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-frames:v", str(max_frames),
             str(processed),
-            "-vf",
-            f"scale=-2:{vipe_height}",
-            "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-            "-pix_fmt",
-            "yuv420p",
-            "-frames:v",
-            str(max_frames),
+            "-map", "[vipe]", "-an", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-frames:v", str(max_frames),
             str(vipe_video),
         ]
-        subprocess.run(vipe_command, check=True)
+        subprocess.run(command, check=True)
         vipe_input = vipe_video
+    _, processed_frames, _, _, _ = _probe_video(processed)
     _, vipe_frames, _, vipe_width, actual_vipe_height = _probe_video(vipe_input)
     if vipe_frames != processed_frames:
         raise RuntimeError(
@@ -668,6 +729,9 @@ def _run_key(videos: list[Path], options: BatchOptions) -> str:
         "disable_cudnn": options.pipeline_options.disable_cudnn,
         "disable_sdp": options.pipeline_options.disable_sdp,
         "persistent_depth_services": options.pipeline_options.persistent_depth_services,
+        "persistent_vipe": options.persistent_vipe,
+        "vipe_services_per_gpu": options.vipe_services_per_gpu,
+        "vipe_recycle_every": options.vipe_recycle_every,
         "model_paths": {
             "pi3x": str(options.model_paths.pi3x),
             "moge3": str(options.model_paths.moge3),
@@ -687,6 +751,8 @@ def _worker_main(
     progress_queue: Any,
     pi3x_service: DepthServiceEndpoint | None,
     moge3_service: DepthServiceEndpoint | None,
+    vipe_service: VipeServiceEndpoint | None,
+    local_run_root: Path,
 ) -> None:
     """Run one fixed task partition on one visible GPU and checkpoint every result."""
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
@@ -711,6 +777,8 @@ def _worker_main(
         keep_work=False,
         pi3x_service=pi3x_service,
         moge3_service=moge3_service,
+        vipe_service=vipe_service,
+        preflight_done=True,
     )
     state: dict[str, Any] = {
         "format_version": 1,
@@ -737,7 +805,7 @@ def _worker_main(
         pending_output: Path | None = None
         relative = _task_name(video)
         job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
-        job_root = checkpoint_path.parent / "stage_cache" / (
+        job_root = local_run_root / "stage_cache" / (
             f"worker_{global_worker_id:03d}_{job_key}"
         )
         if not options.overwrite and valid_existing_output(
@@ -820,6 +888,7 @@ def _worker_main(
                 options.max_video_seconds,
                 options.vipe_height,
                 options.ffmpeg_command,
+                options.pipeline_options.max_inference_side,
             )
             result_dir = camera_artifact_dir(video)
             CameraCreatePipeline(options.model_paths, pipeline_options).run(
@@ -901,11 +970,17 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         raise ValueError("workers_per_gpu must be positive")
     if options.depth_services_per_gpu < 1:
         raise ValueError("depth_services_per_gpu must be positive")
+    if options.vipe_services_per_gpu < 1:
+        raise ValueError("vipe_services_per_gpu must be positive")
+    if options.vipe_recycle_every < 1:
+        raise ValueError("vipe_recycle_every must be positive")
     if (
         options.pipeline_options.persistent_depth_services
         and options.depth_services_per_gpu > options.workers_per_gpu
     ):
         raise ValueError("depth_services_per_gpu cannot exceed workers_per_gpu")
+    if options.persistent_vipe and options.vipe_services_per_gpu > options.workers_per_gpu:
+        raise ValueError("vipe_services_per_gpu cannot exceed workers_per_gpu")
     if options.lease_timeout_seconds <= 0:
         raise ValueError("lease_timeout_seconds must be positive")
     if (
@@ -945,6 +1020,14 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         else _run_key(videos, options)
     )
     run_root = options.checkpoint_root / f"run_{run_token}"
+    local_base = (
+        options.local_work_root.resolve()
+        if options.local_work_root is not None
+        else Path(tempfile.gettempdir()).resolve() / "camera-create"
+    )
+    local_namespace = hashlib.sha256(str(run_root.resolve()).encode()).hexdigest()[:12]
+    local_run_root = local_base / f"run_{run_token}_{local_namespace}"
+    local_run_root.mkdir(parents=True, exist_ok=True)
     manifest_sha256 = ensure_shared_manifest(
         run_root, _manifest_payload(videos, options, layout)
     )
@@ -994,12 +1077,37 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             )
         )
     )
+    vipe_gpu_ids = tuple(
+        gpu_id
+        for gpu_index, gpu_id in enumerate(options.gpu_ids)
+        if options.persistent_vipe
+        and (
+            options.overwrite
+            or any(
+                not valid_existing_output(
+                    video,
+                    options.target_fps,
+                    options.max_frames,
+                    options.max_video_seconds,
+                    options.vipe_height,
+                )
+                for tasks in assignments[
+                    gpu_index * options.workers_per_gpu : (gpu_index + 1)
+                    * options.workers_per_gpu
+                ]
+                for video in tasks
+            )
+        )
+    )
     summary = {
         "input_manifest": str(options.input_manifest),
         "videos_found": len(videos),
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
         "depth_services_per_gpu": options.depth_services_per_gpu,
+        "vipe_services_per_gpu": options.vipe_services_per_gpu,
+        "vipe_recycle_every": options.vipe_recycle_every,
+        "persistent_vipe": options.persistent_vipe,
         "node_rank": options.node_rank,
         "num_nodes": options.num_nodes,
         "local_workers": local_worker_count,
@@ -1018,6 +1126,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "vipe_height": options.vipe_height,
         "already_complete": already_complete,
         "checkpoint_root": str(run_root),
+        "local_work_root": str(local_run_root),
         "overwrite": options.overwrite,
         "keep_stage_cache": options.keep_stage_cache,
         "video_extensions": list(options.extensions),
@@ -1037,6 +1146,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         "disable_sdp": options.pipeline_options.disable_sdp,
         "persistent_depth_services": options.pipeline_options.persistent_depth_services,
         "persistent_depth_service_gpu_ids": list(service_gpu_ids),
+        "persistent_vipe_service_gpu_ids": list(vipe_gpu_ids),
         "pi3x_checkpoint": str(options.model_paths.pi3x),
         "moge3_checkpoint": str(options.model_paths.moge3),
         "vipe_cache": str(options.model_paths.vipe),
@@ -1067,10 +1177,19 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         atexit.unregister(node_lease.release)
         return result
 
+    preflight_vipe_assets(
+        options.model_paths.vipe, options.pipeline_options.allow_vipe_downloads
+    )
+    preflight_vipe_integration(options.pipeline_options.vipe_command)
+    LOG.info("Machine-level VIPE asset/integration preflight passed")
+    LOG.info("Using local intermediate-data root: %s", local_run_root)
+
     service_root: Path | None = None
     services: list[DepthServiceProcess] = []
+    vipe_processes: list[VipeServiceProcess] = []
     pi3x_services: dict[tuple[int, int], DepthServiceEndpoint] = {}
     moge3_services: dict[tuple[int, int], DepthServiceEndpoint] = {}
+    vipe_services: dict[tuple[int, int], VipeServiceEndpoint] = {}
 
     def stop_depth_services() -> None:
         """Stop every persistent depth process owned by this controller."""
@@ -1078,6 +1197,11 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             service.stop()
         if service_root is not None:
             shutil.rmtree(service_root, ignore_errors=True)
+
+    def stop_vipe_services() -> None:
+        """Stop every persistent VIPE process owned by this controller."""
+        for service in reversed(vipe_processes):
+            service.stop()
 
     if service_gpu_ids:
         service_root = Path(tempfile.mkdtemp(prefix="camera-create-depth-services-"))
@@ -1095,6 +1219,18 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             raise
         atexit.register(stop_depth_services)
 
+    if vipe_gpu_ids and options.persistent_vipe:
+        if service_root is None:
+            service_root = Path(tempfile.mkdtemp(prefix="camera-create-services-"))
+        try:
+            vipe_processes, vipe_services = _start_vipe_service_group(
+                vipe_gpu_ids, options, service_root
+            )
+        except Exception:
+            stop_depth_services()
+            raise
+        atexit.register(stop_vipe_services)
+
     context = mp.get_context("spawn")
     progress_queue = context.Queue()
     processes: list[mp.Process] = []
@@ -1105,6 +1241,11 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             local_worker_id,
             options.workers_per_gpu,
             options.depth_services_per_gpu,
+        )
+        vipe_replica_id = depth_service_replica_id(
+            local_worker_id,
+            options.workers_per_gpu,
+            options.vipe_services_per_gpu,
         )
         checkpoint = run_root / f"worker_{global_worker_id:03d}.json"
         process = context.Process(
@@ -1119,6 +1260,8 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
                 progress_queue,
                 pi3x_services.get((gpu_id, replica_id)),
                 moge3_services.get((gpu_id, replica_id)),
+                vipe_services.get((gpu_id, vipe_replica_id)),
+                local_run_root,
             ),
             name=f"camera-worker-{global_worker_id:03d}-gpu-{gpu_id}",
         )
@@ -1176,6 +1319,9 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     }
     _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
     if service_root is not None:
+        if vipe_processes:
+            stop_vipe_services()
+            atexit.unregister(stop_vipe_services)
         stop_depth_services()
         atexit.unregister(stop_depth_services)
     node_lease.release()

@@ -13,6 +13,7 @@ from .config import ModelPaths
 from .depth import fuse_metric_depths, load_depth_cache, save_depth_cache
 from .stage_cache import StageCache, fingerprint, video_identity
 from .vipe_runner import (
+    VipeServiceEndpoint,
     preflight_vipe_assets,
     preflight_vipe_integration,
     run_vipe,
@@ -57,6 +58,8 @@ class PipelineOptions:
     persistent_depth_services: bool = True
     pi3x_service: DepthServiceEndpoint | None = None
     moge3_service: DepthServiceEndpoint | None = None
+    vipe_service: VipeServiceEndpoint | None = None
+    preflight_done: bool = False
 
 
 class CameraCreatePipeline:
@@ -83,11 +86,12 @@ class CameraCreatePipeline:
             raise FileNotFoundError(f"Input video does not exist: {video}")
         if not vipe_video.is_file():
             raise FileNotFoundError(f"VIPE input video does not exist: {vipe_video}")
-        self.models.validate_depth_models()
-        preflight_vipe_assets(
-            self.models.vipe, self.options.allow_vipe_downloads
-        )
-        preflight_vipe_integration(self.options.vipe_command)
+        if not self.options.preflight_done:
+            self.models.validate_depth_models()
+            preflight_vipe_assets(
+                self.models.vipe, self.options.allow_vipe_downloads
+            )
+            preflight_vipe_integration(self.options.vipe_command)
         owned_work = work_dir is None
         actual_work = (
             work_dir.resolve()
@@ -210,6 +214,8 @@ class CameraCreatePipeline:
                     self.options.allow_vipe_downloads,
                     self.options.disable_cudnn,
                     self.options.disable_sdp,
+                    self.options.vipe_service,
+                    self.options.preflight_done,
                 )
                 stage_cache.completed("vipe")
             intrinsics_width, intrinsics_height = vipe_resolution or (

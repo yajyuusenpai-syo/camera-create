@@ -155,6 +155,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--vipe-services-per-gpu",
+        type=int,
+        default=4,
+        help="Persistent VIPE replicas per GPU (default: 4)",
+    )
+    parser.add_argument(
+        "--vipe-recycle-every",
+        type=int,
+        default=25,
+        help="Rebuild each VIPE model cache after this many videos (default: 25)",
+    )
+    parser.add_argument(
+        "--no-persistent-vipe",
+        action="store_true",
+        help="Start a fresh VIPE subprocess for every video",
+    )
+    parser.add_argument(
+        "--local-work-root",
+        type=Path,
+        help="Local stage-cache root (default: /tmp/camera-create on Linux)",
+    )
+    parser.add_argument(
         "--node-rank",
         "--machine-rank",
         "--machine_rank",
@@ -316,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
             gpu_ids=_parse_gpu_ids(args.gpu_ids),
             workers_per_gpu=args.workers_per_gpu,
             depth_services_per_gpu=args.depth_services_per_gpu,
+            vipe_services_per_gpu=args.vipe_services_per_gpu,
+            vipe_recycle_every=args.vipe_recycle_every,
+            persistent_vipe=not args.no_persistent_vipe,
+            local_work_root=args.local_work_root,
             node_rank=args.node_rank,
             num_nodes=args.num_nodes,
             run_id=args.run_id,

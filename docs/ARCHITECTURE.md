@@ -2,13 +2,15 @@
 
 `cli.py` 是唯一推荐入口，内部调用顺序如下：
 
-1. `video.py` 解码视频；保持原视频给 VIPE，只生成受控尺寸的深度推理帧。
+1. FFmpeg只解码源视频一次，在同一filter graph中生成最长边560的深度输入和固定
+   高度720的VIPE输入；两路保证帧数与帧率一致。
 2. `depth.py` 用重叠时间窗运行 Pi3X，获得时序一致的相对深度。
 3. MoGe-3 worker 逐帧推理，获得米制深度、点图、有效掩码和归一化内参；默认采用
    ViT-L 与 3 次 SSR refinement。
 4. 使用论文指定的 inverse-depth weighted scale 与 momentum=0.99 EMA，生成
    VIPE `CachedDepthModel` 消费的米制深度缓存。
-5. `vipe_runner.py` 临时设置缓存路径并执行 `vipe_cached_depth` bundle adjustment。
+5. 常驻VIPE服务设置当前缓存路径并执行`vipe_cached_depth` bundle adjustment；
+   每个视频新建SLAM状态，只复用无状态模型权重。
 6. `artifacts.py` 读取 VIPE 稀疏结果；平移线性插值、旋转使用 quaternion
    SLERP，并将数值漂移投影回 SO(3)。
 7. 同时导出 c2w、w2c、两种内参表达和尺度历史，再写数值验证报告。
@@ -30,7 +32,8 @@
   -> 主 CLI 插值、验证并导出 metric camera
 ```
 
-环境之间不得传递 Python/Torch 对象，只传递有版本标记的 NPZ、JSON 和视频路径。
+环境之间不得传递 Python/Torch 对象，只传递有版本标记的NPZ、JSON和视频路径。
+中间文件默认位于本机`/tmp`，NPZ不压缩；共享盘只保存小型checkpoint和最终结果。
 这样 Pi3X 可保留 NumPy 1.26.4，MoGe-3 可使用 NumPy 2.x 与 FlexGEMM/Triton，
 VIPE 则使用其 CUDA 扩展所需的独立 PyTorch/CUDA 组合。
 

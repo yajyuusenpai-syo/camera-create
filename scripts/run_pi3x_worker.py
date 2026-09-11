@@ -27,7 +27,7 @@ def infer_to_cache(args: argparse.Namespace, model, input_path: Path, output: Pa
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("wb") as stream:
-        np.savez_compressed(
+        np.savez(
             stream,
             depth=depth.astype(np.float32),
             frame_count=video.frame_count,

@@ -4,13 +4,15 @@
 单个视频或目录。推荐先将完整数据集确定性地切成若干份，再为每一份启动一个互相
 独立的单机器任务。每个任务内部仍支持多 GPU、多进程、checkpoint/resume 和 tqdm。
 
-默认情况下，每张GPU启动4个常驻Pi3X服务和4个常驻MoGe-3服务，并启动4个camera
-worker。每个worker固定绑定同卡的一组Pi3X/MoGe-3副本，因此4条视频流水线可以并行
-经过两个深度模型；每个模型副本在整份清单中只加载一次。VIPE仍然为每个视频单独
-启动和退出。
+默认情况下，每张GPU启动4个常驻Pi3X、4个常驻MoGe-3和4个常驻VIPE服务，并启动
+4个camera worker。每个worker固定绑定同卡的一组服务，因此4条视频流水线可以并行；
+Pi3X/MoGe-3权重在整份清单中只加载一次。VIPE复用GeoCalib等无状态重模型，但每个
+视频都会新建SLAM状态，并单独重载绑定当前视频的`depth/cached`，不会串用前一视频
+的深度。默认每25个视频重建一次VIPE模型缓存，以限制长期运行的内存碎片。
 调试旧行为时可传 `--no-persistent-depth-services`，恢复每个视频重新加载深度模型。
 启动阶段先加载全部Pi3X，再加载全部MoGe-3；每个副本波次会跨所有选定GPU并行，
-避免共享/FUSE盘同时承受“GPU数×副本数”个权重读取。VIPE逻辑不受该优化影响。
+避免共享/FUSE盘同时承受“GPU数×副本数”个权重读取。VIPE集成和离线权重预检在
+每台机器主进程中只执行一次，不再由每个视频重复执行。
 
 注意：实测单卡一组Pi3X+MoGe-3约占17GB，4组基础常驻显存约68GB，还未计入VIPE、
 视频张量及其他占卡进程。80GB卡必须先用少量视频观察峰值；若OOM，优先改成
@@ -64,6 +66,8 @@ exec "$PWD/.envs/pi3x/bin/python" cli.py \
   --gpu-ids 0,1,2,3,4,5,6,7 \
   --workers-per-gpu 4 \
   --depth-services-per-gpu 4 \
+  --vipe-services-per-gpu 4 \
+  --local-work-root /tmp/camera-create \
   --disable-cudnn \
   --disable-sdp \
   --pi3x-python "$PWD/.envs/pi3x/bin/python" \
@@ -130,13 +134,18 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 <清单目录>/.camera_create_ckpt/clip_1/run_<任务哈希>/
 ├── manifest.json
 ├── worker_000.json ...
-├── stage_cache/
 └── summary.json
 ```
 
 也可以传 `--checkpoint-dir PATH`。重新执行相同清单和参数时，有效的现有
 `cam_<stem>.json` 会跳过；失败任务会复用已完成的 Pi3X、MoGe-3、metric-depth缓存。
 最终JSON采用原子发布。
+
+大体积视频和NPZ阶段数据默认写到本机`/tmp/camera-create/run_<...>/stage_cache/`，
+不再写共享FUSE数据盘；worker JSON、lease、summary和失败清单仍保存在共享checkpoint
+位置。相同节点上重启可继续读取本地阶段缓存；若节点被回收，最终结果和任务状态仍
+安全，但该视频的中间阶段需要重算。可用`--local-work-root PATH`覆盖本地目录。
+三个深度NPZ均采用未压缩格式，换取更低CPU开销和更快的本地读写。
 
 每个视频目录使用：
 
@@ -157,6 +166,9 @@ lease以最终JSON绝对路径为身份，与清单位置无关。即使清单�
 --gpu-ids 0,1,2,3,4,5,6,7
 --workers-per-gpu 4
 --depth-services-per-gpu 4
+--vipe-services-per-gpu 4
+--vipe-recycle-every 25
+--local-work-root /tmp/camera-create
 --lease-timeout-seconds 900
 --checkpoint-dir PATH
 --overwrite
@@ -164,4 +176,5 @@ lease以最终JSON绝对路径为身份，与清单位置无关。即使清单�
 --disable-cudnn
 --disable-sdp
 --no-persistent-depth-services
+--no-persistent-vipe
 ```
