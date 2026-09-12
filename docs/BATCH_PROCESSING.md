@@ -156,6 +156,16 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 lease以最终JSON绝对路径为身份，与清单位置无关。即使清单意外重叠，同一输出也只能被一个进程持有；
 正常推理持续刷新heartbeat，进程死亡并超过 `--lease-timeout-seconds` 后可被恢复。
 
+不启动模型或完整CLI即可检查本版本的优化接线：
+
+```bash
+.envs/pi3x/bin/python scripts/check_inference_optimizations.py
+```
+
+全部显示`[OK]`且最后为`{"ready": true, "inference_started": false}`，表示机器级
+预检、本机临时目录、未压缩NPZ、常驻VIPE和单次解码双路输出均已进入当前源码。
+该检查不会衡量真实吞吐；性能是否提升仍需使用相同分片多次基准测试。
+
 常用选项：
 
 ```text
