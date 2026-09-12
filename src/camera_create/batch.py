@@ -111,8 +111,18 @@ def discover_videos(root: Path, extensions: tuple[str, ...]) -> list[Path]:
     return sorted(videos, key=lambda path: path.relative_to(root).as_posix())
 
 
-def load_video_manifest(path: Path, extensions: tuple[str, ...]) -> list[Path]:
-    """Load an ordered TXT/JSON video-path shard and validate every source file."""
+def load_video_manifest(
+    path: Path,
+    extensions: tuple[str, ...],
+    *,
+    return_issues: bool = False,
+) -> list[Path] | tuple[list[Path], list[dict[str, Any]]]:
+    """Load a shard, warning and skipping individual unusable video entries.
+
+    The manifest itself must exist and have a supported format.  A stale path in an
+    otherwise valid shard is not a batch-level error: it is recorded as an issue so
+    the remaining videos can still be processed.
+    """
     manifest = path.resolve()
     if not manifest.is_file():
         raise FileNotFoundError(f"Input manifest does not exist: {manifest}")
@@ -144,28 +154,39 @@ def load_video_manifest(path: Path, extensions: tuple[str, ...]) -> list[Path]:
         raise ValueError("--input must be a .txt or .json video-path manifest")
 
     videos: list[Path] = []
+    issues: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for index, entry in enumerate(raw_entries, start=1):
         if isinstance(entry, dict):
             entry = entry.get("path", entry.get("video_path"))
         if not isinstance(entry, str) or not entry.strip():
-            raise ValueError(f"Invalid video path at manifest item {index}: {entry!r}")
+            message = f"Invalid video path at manifest item {index}: {entry!r}"
+            LOG.warning("Skipping manifest entry: %s", message)
+            issues.append({"item": index, "path": None, "reason": "invalid_path", "message": message})
+            continue
         candidate = Path(entry.strip()).expanduser()
         if not candidate.is_absolute():
             candidate = manifest.parent / candidate
         candidate = candidate.resolve()
         if candidate in seen:
-            raise ValueError(f"Duplicate video path in input manifest: {candidate}")
+            message = f"Duplicate video path at manifest item {index}: {candidate}"
+            LOG.warning("Skipping manifest entry: %s", message)
+            issues.append({"item": index, "path": str(candidate), "reason": "duplicate", "message": message})
+            continue
         if not candidate.is_file():
-            raise FileNotFoundError(
-                f"Video listed at manifest item {index} does not exist: {candidate}"
-            )
+            message = f"Video listed at manifest item {index} does not exist: {candidate}"
+            LOG.warning("Skipping manifest entry: %s", message)
+            issues.append({"item": index, "path": str(candidate), "reason": "missing_file", "message": message})
+            continue
         if candidate.suffix.lower() not in normalized_extensions:
-            raise ValueError(
-                f"Unsupported video extension at manifest item {index}: {candidate}"
-            )
+            message = f"Unsupported video extension at manifest item {index}: {candidate}"
+            LOG.warning("Skipping manifest entry: %s", message)
+            issues.append({"item": index, "path": str(candidate), "reason": "unsupported_extension", "message": message})
+            continue
         seen.add(candidate)
         videos.append(candidate)
+    if return_issues:
+        return videos, issues
     return videos
 
 
@@ -700,6 +721,32 @@ def _write_failure_report(
     return report_path, failed_manifest_path
 
 
+def _write_manifest_skip_report(
+    input_manifest: Path, issues: list[dict[str, Any]]
+) -> tuple[Path, Path]:
+    """Write stale or malformed manifest entries beside their source shard."""
+    report_path = input_manifest.with_name(
+        f"{input_manifest.stem}.camera_create_manifest_skipped.json"
+    )
+    skipped_manifest_path = input_manifest.with_name(
+        f"{input_manifest.stem}.camera_create_manifest_skipped.txt"
+    )
+    _atomic_checkpoint(
+        report_path,
+        {
+            "format_version": 1,
+            "input_manifest": str(input_manifest),
+            "issue_count": len(issues),
+            "issues": issues,
+        },
+    )
+    lines = "".join(f"{item['path']}\n" for item in issues if item.get("path"))
+    temporary = skipped_manifest_path.with_suffix(skipped_manifest_path.suffix + ".tmp")
+    temporary.write_text(lines, encoding="utf-8")
+    temporary.replace(skipped_manifest_path)
+    return report_path, skipped_manifest_path
+
+
 def _timing_stats(values: list[float]) -> dict[str, float | int | None]:
     """Summarize measured pure-inference durations without external dependencies."""
     if not values:
@@ -1067,7 +1114,14 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     if options.vipe_height < 2 or options.vipe_height % 2:
         raise ValueError("vipe_height must be a positive even integer")
     options.model_paths.validate_depth_models()
-    videos = load_video_manifest(options.input_manifest, options.extensions)
+    manifest_result = load_video_manifest(
+        options.input_manifest, options.extensions, return_issues=True
+    )
+    assert isinstance(manifest_result, tuple)
+    videos, manifest_issues = manifest_result
+    manifest_skip_report, manifest_skipped_list = _write_manifest_skip_report(
+        options.input_manifest, manifest_issues
+    )
     validate_unique_camera_outputs(videos)
     validate_existing_output_owners(videos)
     local_worker_count = len(options.gpu_ids) * options.workers_per_gpu
@@ -1177,6 +1231,9 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
     summary = {
         "input_manifest": str(options.input_manifest),
         "videos_found": len(videos),
+        "manifest_entries_skipped": len(manifest_issues),
+        "manifest_skip_report": str(manifest_skip_report),
+        "manifest_skipped_list": str(manifest_skipped_list),
         "gpu_ids": list(options.gpu_ids),
         "workers_per_gpu": options.workers_per_gpu,
         "depth_services_per_gpu": options.depth_services_per_gpu,

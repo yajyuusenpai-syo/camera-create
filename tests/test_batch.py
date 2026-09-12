@@ -173,7 +173,7 @@ def test_load_txt_and_json_video_manifests(tmp_path: Path) -> None:
     assert load_video_manifest(json_manifest, (".mp4", ".mkv")) == expected
 
 
-def test_manifest_rejects_missing_duplicate_and_unsupported_paths(tmp_path: Path) -> None:
+def test_manifest_skips_missing_duplicate_and_unsupported_paths(tmp_path: Path) -> None:
     video = tmp_path / "a.mp4"
     video.touch()
     duplicate = tmp_path / "duplicate.txt"
@@ -184,12 +184,22 @@ def test_manifest_rejects_missing_duplicate_and_unsupported_paths(tmp_path: Path
     unsupported.write_text(str(tmp_path / "notes.csv"), encoding="utf-8")
     (tmp_path / "notes.csv").touch()
 
-    with pytest.raises(ValueError, match="Duplicate video path"):
-        load_video_manifest(duplicate, (".mp4",))
-    with pytest.raises(FileNotFoundError, match="does not exist"):
-        load_video_manifest(missing, (".mp4",))
-    with pytest.raises(ValueError, match="Unsupported video extension"):
-        load_video_manifest(unsupported, (".mp4",))
+    duplicate_videos, duplicate_issues = load_video_manifest(
+        duplicate, (".mp4",), return_issues=True
+    )
+    missing_videos, missing_issues = load_video_manifest(
+        missing, (".mp4",), return_issues=True
+    )
+    unsupported_videos, unsupported_issues = load_video_manifest(
+        unsupported, (".mp4",), return_issues=True
+    )
+
+    assert duplicate_videos == [video.resolve()]
+    assert duplicate_issues[0]["reason"] == "duplicate"
+    assert missing_videos == []
+    assert missing_issues[0]["reason"] == "missing_file"
+    assert unsupported_videos == []
+    assert unsupported_issues[0]["reason"] == "unsupported_extension"
 
 
 def test_persistent_model_group_starts_all_gpus_concurrently(
