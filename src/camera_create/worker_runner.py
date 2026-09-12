@@ -28,6 +28,7 @@ class DepthWorkerResult:
     inference_width: int
     inference_height: int
     fps: float
+    inference_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,11 @@ def load_worker_cache(path: Path, model: str) -> DepthWorkerResult:
             inference_width=int(data["inference_width"]),
             inference_height=int(data["inference_height"]),
             fps=float(data["fps"]),
+            inference_seconds=(
+                float(data["inference_seconds"])
+                if "inference_seconds" in data.files
+                else None
+            ),
         )
     expected = (
         result.frame_count,

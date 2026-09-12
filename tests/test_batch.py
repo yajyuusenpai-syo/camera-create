@@ -15,6 +15,7 @@ from camera_create.batch import (
     BatchOptions,
     _start_depth_service_group,
     _write_failure_report,
+    _write_runtime_report,
     assign_tasks,
     camera_artifact_dir,
     camera_json_path,
@@ -45,6 +46,38 @@ def test_recursive_discovery_and_static_assignment(tmp_path: Path) -> None:
     assert camera_json_path(first).name == "cam_a.json"
     assert camera_artifact_dir(first).name == "a.MP4.camera"
     assert camera_artifact_dir(second).parent == nested.resolve()
+
+
+def test_runtime_report_separates_models_and_excludes_cold_vipe(tmp_path: Path) -> None:
+    shard = tmp_path / "clip_1.txt"
+    shard.touch()
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    (run_root / "worker_000.json").write_text(
+        json.dumps({
+            "global_worker_id": 0,
+            "gpu_id": 2,
+            "tasks": {
+                "/data/a.mp4": {"model_timings": {
+                    "pi3x": {"pure_inference_seconds": 2.0},
+                    "moge3": {"pure_inference_seconds": 3.0},
+                    "vipe": {"pure_inference_seconds": None, "model_cache_cold": True},
+                }},
+                "/data/b.mp4": {"model_timings": {
+                    "pi3x": {"pure_inference_seconds": 4.0},
+                    "moge3": {"pure_inference_seconds": 5.0},
+                    "vipe": {"pure_inference_seconds": 6.0, "model_cache_cold": False},
+                }},
+            },
+        }),
+        encoding="utf-8",
+    )
+    path = _write_runtime_report(shard, run_root, "run-1", 0, 1)
+    report = json.loads(path.read_text(encoding="utf-8"))
+    assert report["models"]["pi3x"]["total_seconds"] == 6.0
+    assert report["models"]["moge3"]["total_seconds"] == 8.0
+    assert report["models"]["vipe"]["total_seconds"] == 6.0
+    assert report["vipe_cold_requests_excluded"] == 1
 
 
 def test_failure_report_is_written_beside_shard(tmp_path: Path) -> None:

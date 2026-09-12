@@ -126,8 +126,10 @@ class CameraCreatePipeline:
         try:
             pi3x_cache = actual_work / "pi3x_depth.npz"
             moge3_cache = actual_work / "moge3_depth.npz"
+            pi3x_reused = False
             try:
                 pi3x_result = load_worker_cache(pi3x_cache, "Pi3X")
+                pi3x_reused = True
                 LOG.info("[resume] Reusing Pi3X depth: %s", pi3x_cache)
                 stage_cache.completed("pi3x")
             except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
@@ -153,8 +155,10 @@ class CameraCreatePipeline:
             # Unknown FoV must remain unknown: MoGe-3 can infer it from the point
             # map, while forcing the former 60-degree fallback biases geometry.
             fov_x = self.options.fov_x_deg
+            moge3_reused = False
             try:
                 moge3_result = load_worker_cache(moge3_cache, "MoGe-3")
+                moge3_reused = True
                 LOG.info("[resume] Reusing MoGe-3 depth: %s", moge3_cache)
                 stage_cache.completed("moge3")
             except Exception:  # noqa: BLE001 - any corrupt/incomplete cache is rebuilt
@@ -199,13 +203,15 @@ class CameraCreatePipeline:
                 stage_cache.completed("metric_depth")
             vipe_dir = actual_work / "vipe"
             completed_stages = stage_cache.read().get("completed_stages", [])
-            if "vipe" in completed_stages and vipe_dir.is_dir():
+            vipe_reused = "vipe" in completed_stages and vipe_dir.is_dir()
+            vipe_timing: dict[str, object] = {}
+            if vipe_reused:
                 LOG.info("[resume] Reusing completed VIPE output: %s", vipe_dir)
             else:
                 if vipe_dir.is_dir():
                     shutil.rmtree(vipe_dir)
                 LOG.info("Running VIPE metric bundle adjustment")
-                run_vipe(
+                vipe_timing = run_vipe(
                     vipe_video,
                     vipe_dir,
                     cache_path,
@@ -216,7 +222,7 @@ class CameraCreatePipeline:
                     self.options.disable_sdp,
                     self.options.vipe_service,
                     self.options.preflight_done,
-                )
+                ) or {}
                 stage_cache.completed("vipe")
             intrinsics_width, intrinsics_height = vipe_resolution or (
                 pi3x_result.original_width,
@@ -249,6 +255,24 @@ class CameraCreatePipeline:
                 scale,
                 metadata,
             )
+            report["model_timings"] = {
+                "pi3x": {
+                    "pure_inference_seconds": (
+                        None if pi3x_reused else pi3x_result.inference_seconds
+                    ),
+                    "stage_cache_reused": pi3x_reused,
+                },
+                "moge3": {
+                    "pure_inference_seconds": (
+                        None if moge3_reused else moge3_result.inference_seconds
+                    ),
+                    "stage_cache_reused": moge3_reused,
+                },
+                "vipe": {
+                    **vipe_timing,
+                    "stage_cache_reused": vipe_reused,
+                },
+            }
             stage_cache.completed("camera_export")
             if self.options.keep_work:
                 retained = output_dir / "work"

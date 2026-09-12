@@ -7,6 +7,7 @@ import argparse
 import gc
 import json
 import os
+import time
 import traceback
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -46,10 +47,11 @@ def make_vipe_pipeline(output: Path):
     return make_pipeline(args.pipeline)
 
 
-def infer(pipeline, video: Path, output: Path, cache_path: Path) -> None:
+def infer(pipeline, video: Path, output: Path, cache_path: Path) -> dict[str, float]:
     """Reset the video-bound depth cache and run fresh SLAM state for one stream."""
     from vipe.streams.base import ProcessedVideoStream
     from vipe.streams.raw_mp4_stream import RawMp4Stream
+    from vipe.utils import io
 
     os.environ["SANA_WM_CACHED_DEPTH_PATH"] = str(cache_path.resolve())
     output.mkdir(parents=True, exist_ok=True)
@@ -61,10 +63,37 @@ def infer(pipeline, video: Path, output: Path, cache_path: Path) -> None:
     models = getattr(model_cache, "_models", None)
     if isinstance(models, dict):
         models.pop("depth/cached", None)
+    decode_started = time.perf_counter()
     stream = ProcessedVideoStream(RawMp4Stream(video), []).cache(
         desc="Reading video stream"
     )
-    pipeline.run(stream)
+    decode_seconds = time.perf_counter() - decode_started
+    artifact_seconds = 0.0
+    original_save_artifacts = io.save_artifacts
+
+    def timed_save_artifacts(*args, **kwargs):
+        """Measure VIPE's bulk artifact writer separately from inference."""
+        nonlocal artifact_seconds
+        started = time.perf_counter()
+        try:
+            return original_save_artifacts(*args, **kwargs)
+        finally:
+            artifact_seconds += time.perf_counter() - started
+
+    io.save_artifacts = timed_save_artifacts
+    inference_started = time.perf_counter()
+    try:
+        pipeline.run(stream)
+    finally:
+        pipeline_seconds = time.perf_counter() - inference_started
+        io.save_artifacts = original_save_artifacts
+    return {
+        "request_seconds": decode_seconds + pipeline_seconds,
+        "decode_seconds": decode_seconds,
+        "pipeline_seconds": pipeline_seconds,
+        "artifact_write_seconds": artifact_seconds,
+        "compute_seconds": max(0.0, pipeline_seconds - artifact_seconds),
+    }
 
 
 def main() -> int:
@@ -89,6 +118,7 @@ def main() -> int:
     temporary.write_text(json.dumps({"host": host, "port": port}), encoding="utf-8")
     temporary.replace(args.ready_file)
     completed = 0
+    cache_cold = True
     try:
         while True:
             connection = listener.accept()
@@ -97,19 +127,32 @@ def main() -> int:
                 if request.get("command") == "shutdown":
                     connection.send({"ok": True})
                     return 0
-                infer(
+                measured = infer(
                     pipeline,
                     Path(request["input"]),
                     Path(request["output"]),
                     Path(request["cache_path"]),
                 )
                 completed += 1
-                connection.send({"ok": True})
+                connection.send(
+                    {
+                        "ok": True,
+                        "timings": {
+                            **measured,
+                            "pure_inference_seconds": (
+                                None if cache_cold else measured["compute_seconds"]
+                            ),
+                            "model_cache_cold": cache_cold,
+                        },
+                    }
+                )
+                cache_cold = False
                 if completed % args.recycle_every == 0:
                     del pipeline
                     gc.collect()
                     torch.cuda.empty_cache()
                     pipeline = make_vipe_pipeline(bootstrap_output)
+                    cache_cold = True
             except Exception as error:  # noqa: BLE001
                 try:
                     connection.send(
@@ -125,6 +168,7 @@ def main() -> int:
                 gc.collect()
                 torch.cuda.empty_cache()
                 pipeline = make_vipe_pipeline(bootstrap_output)
+                cache_cold = True
             finally:
                 connection.close()
     finally:

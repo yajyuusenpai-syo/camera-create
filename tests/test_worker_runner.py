@@ -27,6 +27,7 @@ def write_cache(path: Path, frames: int = 2, width: int = 8) -> None:
         inference_width=width,
         inference_height=4,
         fps=24.0,
+        inference_seconds=1.25,
     )
 
 
@@ -39,6 +40,7 @@ def test_worker_cache_contract_and_match(tmp_path: Path) -> None:
     moge = load_worker_cache(moge_path, "MoGe-3")
     ensure_matching_workers(pi3, moge)
     assert pi3.depth.shape == (2, 4, 8)
+    assert pi3.inference_seconds == 1.25
 
 
 def test_worker_metadata_mismatch_is_rejected(tmp_path: Path) -> None:

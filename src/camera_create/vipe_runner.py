@@ -223,7 +223,7 @@ def start_vipe_service(
 
 def _request_vipe_service(
     endpoint: VipeServiceEndpoint, video: Path, output_dir: Path, cache_path: Path
-) -> None:
+) -> dict[str, object]:
     """Run one video synchronously through an already initialized VIPE service."""
     connection = Client(
         (endpoint.host, endpoint.port),
@@ -245,6 +245,8 @@ def _request_vipe_service(
     if not isinstance(response, dict) or response.get("ok") is not True:
         detail = response.get("error", response) if isinstance(response, dict) else response
         raise RuntimeError(f"Persistent VIPE worker failed: {detail}")
+    timings = response.get("timings", {})
+    return timings if isinstance(timings, dict) else {}
 
 
 def run_vipe(
@@ -258,12 +260,11 @@ def run_vipe(
     disable_sdp: bool = False,
     service: VipeServiceEndpoint | None = None,
     assets_preflight_done: bool = False,
-) -> None:
+) -> dict[str, object]:
     """Run VIPE cached-depth BA, inheriting metric scale from the depth cache."""
     output_dir.mkdir(parents=True, exist_ok=True)
     if service is not None:
-        _request_vipe_service(service, video, output_dir, cache_path)
-        return
+        return _request_vipe_service(service, video, output_dir, cache_path)
     executable = Path(find_vipe(command)).resolve()
     python = executable.parent / ("python.exe" if os.name == "nt" else "python")
     if not python.is_file():
@@ -301,4 +302,12 @@ def run_vipe(
                 ],
             }
         )
+        started = time.perf_counter()
         subprocess.run(args, check=True, env=process_env)
+        elapsed = time.perf_counter() - started
+    return {
+        "request_seconds": elapsed,
+        "pure_inference_seconds": None,
+        "model_cache_cold": True,
+        "note": "one-shot VIPE duration includes model loading",
+    }

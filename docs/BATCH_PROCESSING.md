@@ -116,6 +116,7 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 /data/shards/clip_1.txt
 /data/shards/clip_1.camera_create_failures.json
 /data/shards/clip_1.camera_create_failed.txt
+/data/shards/clip_1.camera_create_runtime.json
 ```
 
 报告包含失败视频路径、worker/GPU、完整 traceback、已完成阶段和保留的stage cache
@@ -125,6 +126,15 @@ bash scripts/run_batch.sh /path/to/clip_1.txt \
 一个失败或拒收视频的绝对路径，
 可以直接再次传给 `--input`。即使没有失败也会生成空TXT和诊断报告，并写入
 `issue_count: 0`，便于批量核查。
+
+`camera_create_runtime.json`按视频分别保存Pi3X、MoGe-3和VIPE时间，并为每个模型
+汇总`count`、`total_seconds`、`mean_seconds`、`p50_seconds`和`p90_seconds`。
+Pi3X/MoGe-3只计模型前向，不计权重预加载、视频解码和NPZ写入。VIPE分别记录
+`decode_seconds`、`artifact_write_seconds`和`compute_seconds`，其纯推理汇总采用
+扣除视频解码和主要artifact写入后的`compute_seconds`。VIPE的模型在首个
+请求中延迟加载，因此每个服务首次请求及每次recycle后的冷请求会标记
+`model_cache_cold: true`，其耗时保留在逐视频`request_seconds`中，但不会进入
+`pure_inference_seconds`和汇总；如此可避免把预加载时间误算为纯推理时间。
 
 ## Checkpoint与防重复
 

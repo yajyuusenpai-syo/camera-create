@@ -700,6 +700,76 @@ def _write_failure_report(
     return report_path, failed_manifest_path
 
 
+def _timing_stats(values: list[float]) -> dict[str, float | int | None]:
+    """Summarize measured pure-inference durations without external dependencies."""
+    if not values:
+        return {"count": 0, "total_seconds": 0.0, "mean_seconds": None,
+                "p50_seconds": None, "p90_seconds": None}
+    ordered = sorted(values)
+    percentile = lambda fraction: ordered[round((len(ordered) - 1) * fraction)]
+    return {
+        "count": len(ordered),
+        "total_seconds": sum(ordered),
+        "mean_seconds": sum(ordered) / len(ordered),
+        "p50_seconds": percentile(0.50),
+        "p90_seconds": percentile(0.90),
+    }
+
+
+def _write_runtime_report(
+    input_manifest: Path, run_root: Path, run_id: str, node_rank: int, num_nodes: int
+) -> Path:
+    """Collect per-model inference-only timings into one report beside the shard."""
+    videos: list[dict[str, Any]] = []
+    pure: dict[str, list[float]] = {"pi3x": [], "moge3": [], "vipe": []}
+    vipe_cold_requests = 0
+    for checkpoint in sorted(run_root.glob("worker_*.json")):
+        try:
+            worker = json.loads(checkpoint.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for video_path, state in worker.get("tasks", {}).items():
+            if not isinstance(state, dict) or not isinstance(state.get("model_timings"), dict):
+                continue
+            timings = state["model_timings"]
+            videos.append({"video_path": video_path, "worker_id": worker.get("global_worker_id"),
+                           "gpu_id": worker.get("gpu_id"), "models": timings})
+            for model, model_values in pure.items():
+                model_timing = timings.get(model, {})
+                if not isinstance(model_timing, dict):
+                    continue
+                value = model_timing.get("pure_inference_seconds")
+                if isinstance(value, (int, float)):
+                    model_values.append(float(value))
+            vipe_timing = timings.get("vipe", {})
+            if isinstance(vipe_timing, dict) and vipe_timing.get("model_cache_cold") is True:
+                vipe_cold_requests += 1
+    videos.sort(key=lambda item: item["video_path"])
+    suffix = "" if num_nodes == 1 else f".node_{node_rank:03d}"
+    path = input_manifest.with_name(
+        f"{input_manifest.stem}.camera_create_runtime{suffix}.json"
+    )
+    _atomic_checkpoint(
+        path,
+        {
+            "format_version": 1,
+            "input_manifest": str(input_manifest),
+            "run_id": run_id,
+            "node_rank": node_rank,
+            "num_nodes": num_nodes,
+            "timing_definition": (
+                "Pi3X/MoGe-3 time covers model forward only. VIPE pure time excludes "
+                "cold requests that load/recycle its model cache."
+            ),
+            "models": {name: _timing_stats(values) for name, values in pure.items()},
+            "vipe_cold_requests_excluded": vipe_cold_requests,
+            "videos_with_timings": len(videos),
+            "videos": videos,
+        },
+    )
+    return path
+
+
 def _run_key(videos: list[Path], options: BatchOptions) -> str:
     stable = {
         "videos": [
@@ -803,6 +873,7 @@ def _worker_main(
     _atomic_checkpoint(checkpoint_path, state)
     for video in tasks:
         pending_output: Path | None = None
+        pipeline_report: dict[str, Any] | None = None
         relative = _task_name(video)
         job_key = hashlib.sha256(relative.encode()).hexdigest()[:16]
         job_root = local_run_root / "stage_cache" / (
@@ -891,7 +962,7 @@ def _worker_main(
                 options.pipeline_options.max_inference_side,
             )
             result_dir = camera_artifact_dir(video)
-            CameraCreatePipeline(options.model_paths, pipeline_options).run(
+            pipeline_report = CameraCreatePipeline(options.model_paths, pipeline_options).run(
                 normalized,
                 result_dir,
                 job_root / "pipeline",
@@ -919,6 +990,7 @@ def _worker_main(
                 "status": "completed",
                 "output": str(camera_json_path(video)),
                 "frame_count": payload["frame_count"],
+                "model_timings": pipeline_report.get("model_timings", {}),
             }
             if not options.keep_stage_cache:
                 shutil.rmtree(job_root, ignore_errors=True)
@@ -947,6 +1019,9 @@ def _worker_main(
                 "validation": error.report if rejected else None,
                 "stage_cache": str(job_root),
                 "completed_stages": completed_stages,
+                "model_timings": (
+                    pipeline_report.get("model_timings", {}) if pipeline_report else {}
+                ),
             }
             event = (
                 "rejected" if rejected else "failed",
@@ -1161,6 +1236,13 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             options.num_nodes,
             0,
         )
+        runtime_report = _write_runtime_report(
+            options.input_manifest,
+            run_root,
+            run_token,
+            options.node_rank,
+            options.num_nodes,
+        )
         result = {
             **summary,
             "completed": 0,
@@ -1171,6 +1253,7 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
             "worker_crashes": 0,
             "failure_report": str(failure_report),
             "failed_manifest": str(failed_manifest),
+            "runtime_report": str(runtime_report),
         }
         _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
         node_lease.release()
@@ -1310,12 +1393,16 @@ def run_batch(options: BatchOptions) -> dict[str, Any]:
         options.num_nodes,
         crashed,
     )
+    runtime_report = _write_runtime_report(
+        options.input_manifest, run_root, run_token, options.node_rank, options.num_nodes
+    )
     result = {
         **summary,
         **counts,
         "worker_crashes": crashed,
         "failure_report": str(failure_report),
         "failed_manifest": str(failed_manifest),
+        "runtime_report": str(runtime_report),
     }
     _write_batch_summary(run_root, options.node_rank, options.num_nodes, result)
     if service_root is not None:

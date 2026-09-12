@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -20,10 +21,12 @@ from camera_create.runtime import configure_torch_backends
 from camera_create.video import read_video
 
 
-def infer_to_cache(args: argparse.Namespace, model, input_path: Path, output: Path) -> None:
+def infer_to_cache(args: argparse.Namespace, model, input_path: Path, output: Path) -> dict[str, float]:
     """Infer one video with an already-loaded Pi3X model and publish its cache."""
     video = read_video(input_path, args.max_inference_side)
+    started = time.perf_counter()
     depth = infer_pi3x(model, video.frames_rgb, args.device, args.chunk, args.stride)
+    inference_seconds = time.perf_counter() - started
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("wb") as stream:
@@ -38,8 +41,10 @@ def infer_to_cache(args: argparse.Namespace, model, input_path: Path, output: Pa
             fps=video.fps,
             model="pi3x",
             schema_version=1,
+            inference_seconds=inference_seconds,
         )
     temporary.replace(output)
+    return {"inference_seconds": inference_seconds}
 
 
 def serve(args: argparse.Namespace, model) -> int:
@@ -60,10 +65,10 @@ def serve(args: argparse.Namespace, model) -> int:
                 if request.get("command") == "shutdown":
                     connection.send({"ok": True})
                     return 0
-                infer_to_cache(
+                timings = infer_to_cache(
                     args, model, Path(request["input"]), Path(request["output"])
                 )
-                connection.send({"ok": True})
+                connection.send({"ok": True, "timings": timings})
             except Exception as error:  # noqa: BLE001 - isolate one request
                 try:
                     connection.send(

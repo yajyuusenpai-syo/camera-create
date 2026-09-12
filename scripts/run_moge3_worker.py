@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
 from multiprocessing.connection import Listener
 from pathlib import Path
@@ -34,10 +35,11 @@ def infer_to_cache(
     input_path: Path,
     output: Path,
     fov_x_deg: float | None,
-) -> None:
+) -> dict[str, float]:
     """Infer one video with an already-loaded MoGe-3 model and publish its cache."""
     video = read_video(input_path, args.max_inference_side)
     depths: list[np.ndarray] = []
+    started = time.perf_counter()
     with torch.inference_mode():
         for frame in video.frames_rgb:
             image = torch.from_numpy(frame).permute(2, 0, 1).to(
@@ -63,6 +65,7 @@ def infer_to_cache(
                 ).squeeze()
             depths.append(depth.cpu().numpy().astype(np.float32, copy=False))
     output_depth = np.stack(depths)
+    inference_seconds = time.perf_counter() - started
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("wb") as stream:
@@ -77,8 +80,10 @@ def infer_to_cache(
             fps=video.fps,
             model="moge3",
             schema_version=1,
+            inference_seconds=inference_seconds,
         )
     temporary.replace(output)
+    return {"inference_seconds": inference_seconds}
 
 
 def serve(args: argparse.Namespace, model) -> int:
@@ -103,14 +108,14 @@ def serve(args: argparse.Namespace, model) -> int:
                 if request.get("command") == "shutdown":
                     connection.send({"ok": True})
                     return 0
-                infer_to_cache(
+                timings = infer_to_cache(
                     args,
                     model,
                     Path(request["input"]),
                     Path(request["output"]),
                     request.get("fov_x_deg"),
                 )
-                connection.send({"ok": True})
+                connection.send({"ok": True, "timings": timings})
             except Exception as error:  # noqa: BLE001 - isolate one request
                 try:
                     connection.send(
